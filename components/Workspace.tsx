@@ -17,6 +17,9 @@ interface PdfPage {
   originalPageIndex: number;
   thumbnail: string;
   isImage?: boolean;
+  rotation: number;
+  sourceFileKey: string;
+  sourceFileName: string;
 }
 
 const LANGUAGES = [
@@ -39,9 +42,12 @@ export const Workspace: React.FC<WorkspaceProps> = ({ tool }) => {
   const [summaryText, setSummaryText] = useState<string | null>(null);
   const [resetKey, setResetKey] = useState(0); 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const architectFileInputRef = useRef<HTMLInputElement>(null);
 
   const [pdfPages, setPdfPages] = useState<PdfPage[]>([]);
   const [isArchitectMode, setIsArchitectMode] = useState(false);
+  const [selectedPageIds, setSelectedPageIds] = useState<Set<string>>(new Set());
+  const [draggingPageId, setDraggingPageId] = useState<string | null>(null);
 
   const [gridData, setGridData] = useState<any[][]>([]);
   const [isGridMode, setIsGridMode] = useState(false);
@@ -133,6 +139,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({ tool }) => {
     setSummaryText(null);
     setPdfPages([]);
     setIsArchitectMode(false);
+    setSelectedPageIds(new Set());
+    setDraggingPageId(null);
     setGridData([]);
     setIsGridMode(false);
     setDuplicateIndices(new Set());
@@ -142,6 +150,15 @@ export const Workspace: React.FC<WorkspaceProps> = ({ tool }) => {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) addFiles(Array.from(e.target.files) as File[]);
+  };
+
+  const handleArchitectFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    const incoming = Array.from(e.target.files) as File[];
+    const pages = await processInputFilesToPages(incoming);
+    setPdfPages(prev => [...prev, ...pages]);
+    setSelectedPageIds(new Set());
+    e.target.value = '';
   };
 
   const addFiles = (newFiles: File[]) => {
@@ -219,6 +236,8 @@ export const Workspace: React.FC<WorkspaceProps> = ({ tool }) => {
       if (tool.id === 'pdf-menu-architect') {
         const pages = await processInputFilesToPages(files);
         setPdfPages(pages);
+        setSelectedPageIds(new Set());
+        setDraggingPageId(null);
         setIsArchitectMode(true);
         setProcessing({ status: 'idle', message: '' });
         return;
@@ -383,6 +402,7 @@ export const Workspace: React.FC<WorkspaceProps> = ({ tool }) => {
   const processInputFilesToPages = async (targetFiles: File[]): Promise<PdfPage[]> => {
     const pages: PdfPage[] = [];
     for (const file of targetFiles) {
+      const sourceFileKey = `${file.name}-${file.size}-${file.lastModified}`;
       if (file.type === 'application/pdf') {
         const buffer = await file.arrayBuffer();
         const pdf = await (window as any).pdfjsLib.getDocument(buffer).promise;
@@ -394,23 +414,100 @@ export const Workspace: React.FC<WorkspaceProps> = ({ tool }) => {
           canvas.height = viewport.height;
           canvas.width = viewport.width;
           await page.render({ canvasContext: context, viewport }).promise;
-          pages.push({ id: Math.random().toString(36).substr(2, 9), file: file, originalPageIndex: i - 1, thumbnail: canvas.toDataURL() });
+          pages.push({
+            id: Math.random().toString(36).substr(2, 9),
+            file,
+            originalPageIndex: i - 1,
+            thumbnail: canvas.toDataURL(),
+            rotation: 0,
+            sourceFileKey,
+            sourceFileName: file.name
+          });
         }
       } else if (file.type.startsWith('image/')) {
         const url = URL.createObjectURL(file);
-        pages.push({ id: Math.random().toString(36).substr(2, 9), file: file, originalPageIndex: 0, thumbnail: url, isImage: true });
+        pages.push({
+          id: Math.random().toString(36).substr(2, 9),
+          file,
+          originalPageIndex: 0,
+          thumbnail: url,
+          isImage: true,
+          rotation: 0,
+          sourceFileKey,
+          sourceFileName: file.name
+        });
       }
     }
     return pages;
+  };
+
+  const removeArchitectPage = (id: string) => {
+    setPdfPages(prev => prev.filter(page => page.id !== id));
+    setSelectedPageIds(prev => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  };
+
+  const rotateArchitectPage = (id: string) => {
+    setPdfPages(prev =>
+      prev.map(page => (
+        page.id === id
+          ? { ...page, rotation: (page.rotation + 90) % 360 }
+          : page
+      ))
+    );
+  };
+
+  const toggleArchitectPageSelection = (id: string) => {
+    setSelectedPageIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const deleteSelectedArchitectPages = () => {
+    if (selectedPageIds.size === 0) return;
+    setPdfPages(prev => prev.filter(page => !selectedPageIds.has(page.id)));
+    setSelectedPageIds(new Set());
+  };
+
+  const deleteArchitectSeries = (page: PdfPage) => {
+    setPdfPages(prev => prev.filter(p => p.sourceFileKey !== page.sourceFileKey));
+    setSelectedPageIds(prev => {
+      const next = new Set(prev);
+      pdfPages.forEach(p => {
+        if (p.sourceFileKey === page.sourceFileKey) next.delete(p.id);
+      });
+      return next;
+    });
+  };
+
+  const reorderArchitectPages = (draggedId: string, targetId: string) => {
+    if (draggedId === targetId) return;
+    setPdfPages(prev => {
+      const from = prev.findIndex(p => p.id === draggedId);
+      const to = prev.findIndex(p => p.id === targetId);
+      if (from === -1 || to === -1) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
   };
 
   const finalizeArchitectPdf = async () => {
     if (pdfPages.length === 0) return;
     setProcessing({ status: 'processing', message: 'Generating master document...' });
     try {
-      const blob = await pdfService.editPdf(pdfPages.map(p => ({ file: p.file, originalPageIndex: p.originalPageIndex })));
+      const blob = await pdfService.editPdf(pdfPages.map(p => ({ file: p.file, originalPageIndex: p.originalPageIndex, isImage: p.isImage, rotation: p.rotation })));
       setProcessing({ status: 'success', message: 'Master PDF Built!', details: `${pdfPages.length} pages merged.`, resultBlob: blob, resultFilename: `architected_doc.pdf` });
       setIsArchitectMode(false);
+      setSelectedPageIds(new Set());
+      setDraggingPageId(null);
     } catch (err: any) {
       setProcessing({ status: 'error', message: 'Export Failed', details: err.message });
     }
@@ -510,15 +607,43 @@ export const Workspace: React.FC<WorkspaceProps> = ({ tool }) => {
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 px-4 shrink-0 gap-4">
           <div><h2 className="text-2xl font-black text-slate-900 tracking-tight">PDF Master Architect</h2></div>
           <div className="flex flex-wrap items-center gap-3">
+            <button onClick={deleteSelectedArchitectPages} disabled={selectedPageIds.size === 0} className="px-4 py-2 bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white text-[10px] font-black uppercase rounded-xl shadow-lg transition-colors">Delete Selected ({selectedPageIds.size})</button>
+            <button onClick={() => architectFileInputRef.current?.click()} className="px-6 py-2 bg-slate-800 hover:bg-slate-900 text-white text-[10px] font-black uppercase rounded-xl shadow-lg transition-colors">Add PDF / Image</button>
             <button onClick={finalizeArchitectPdf} className="px-6 py-2 bg-indigo-600 text-white text-[10px] font-black uppercase rounded-xl shadow-lg">Export Master</button>
             <button onClick={resetWorkspace} className="px-6 py-2 bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-red-600 text-[10px] font-black uppercase rounded-xl transition-colors">Reset Architect</button>
+            <input type="file" ref={architectFileInputRef} className="hidden" accept=".pdf,image/*" multiple onChange={handleArchitectFileChange} />
           </div>
         </div>
         <div className="flex-grow overflow-y-auto p-8 bg-slate-50 rounded-[2rem] border border-slate-100 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-6">
           {pdfPages.map((page, idx) => (
-            <div key={page.id} className={`relative bg-white p-2 rounded-2xl border border-slate-200 shadow-sm`}>
+            <div
+              key={page.id}
+              draggable
+              onDragStart={() => setDraggingPageId(page.id)}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={() => {
+                if (draggingPageId) reorderArchitectPages(draggingPageId, page.id);
+                setDraggingPageId(null);
+              }}
+              onDragEnd={() => setDraggingPageId(null)}
+              className={`relative bg-white p-2 rounded-2xl border shadow-sm ${selectedPageIds.has(page.id) ? 'border-indigo-500 ring-2 ring-indigo-200' : 'border-slate-200'}`}
+            >
               <div className="absolute top-2 left-2 z-10 text-white text-[9px] font-black px-2 py-1 rounded-md bg-slate-900">P.{idx + 1}</div>
-              <img src={page.thumbnail} alt={`P ${idx+1}`} className="w-full h-auto aspect-[1/1.41] object-contain rounded-lg" />
+              <div className="absolute bottom-2 left-2 z-10 text-[8px] font-black px-2 py-1 rounded-md bg-slate-900 text-white max-w-[92%] truncate">
+                {page.sourceFileName}
+              </div>
+              <button
+                onClick={() => toggleArchitectPageSelection(page.id)}
+                className={`absolute top-2 right-[132px] z-10 px-2 py-1 text-[9px] font-black rounded-md ${selectedPageIds.has(page.id) ? 'bg-indigo-700 text-white' : 'bg-white text-slate-700 border border-slate-300'}`}
+              >
+                {selectedPageIds.has(page.id) ? 'Selected' : 'Select'}
+              </button>
+              <div className="absolute top-2 right-2 z-10 flex gap-1">
+                <button onClick={() => rotateArchitectPage(page.id)} className="px-2 py-1 text-[9px] font-black bg-indigo-600 text-white rounded-md">Rotate</button>
+                <button onClick={() => removeArchitectPage(page.id)} className="px-2 py-1 text-[9px] font-black bg-rose-600 text-white rounded-md">Remove</button>
+                <button onClick={() => deleteArchitectSeries(page)} className="px-2 py-1 text-[9px] font-black bg-slate-800 text-white rounded-md">Delete Series</button>
+              </div>
+              <img src={page.thumbnail} alt={`P ${idx+1}`} style={{ transform: `rotate(${page.rotation}deg)` }} className="w-full h-auto aspect-[1/1.41] object-contain rounded-lg transition-transform" />
             </div>
           ))}
         </div>

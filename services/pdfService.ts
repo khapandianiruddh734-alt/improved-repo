@@ -34,12 +34,37 @@ export async function imagesToPdf(files: File[]): Promise<Blob> {
 /**
  * Edit PDF (Reorder, Remove, Merge)
  */
-export async function editPdf(pages: { file: File, originalPageIndex: number }[]): Promise<Blob> {
+export async function editPdf(pages: { file: File, originalPageIndex: number, isImage?: boolean, rotation?: number }[]): Promise<Blob> {
   const mergedPdf = await PDFLib.PDFDocument.create();
   
   const docCache = new Map<string, any>();
+  const degrees = (value: number) => PDFLib.degrees(value);
 
   for (const pageInfo of pages) {
+    const rotation = pageInfo.rotation || 0;
+
+    if (pageInfo.isImage || pageInfo.file.type.startsWith('image/')) {
+      const imageBytes = await pageInfo.file.arrayBuffer();
+      const imageType = pageInfo.file.type.toLowerCase();
+      const isPng = imageType.includes('png');
+      const embeddedImage = isPng
+        ? await mergedPdf.embedPng(imageBytes)
+        : await mergedPdf.embedJpg(imageBytes);
+
+      const imgWidth = embeddedImage.width;
+      const imgHeight = embeddedImage.height;
+      const pdfPage = mergedPdf.addPage([imgWidth, imgHeight]);
+
+      pdfPage.drawImage(embeddedImage, {
+        x: 0,
+        y: 0,
+        width: imgWidth,
+        height: imgHeight,
+      });
+      pdfPage.setRotation(degrees(rotation));
+      continue;
+    }
+
     const fileId = pageInfo.file.name + pageInfo.file.size;
     let srcDoc = docCache.get(fileId);
     
@@ -50,6 +75,7 @@ export async function editPdf(pages: { file: File, originalPageIndex: number }[]
     }
 
     const [copiedPage] = await mergedPdf.copyPages(srcDoc, [pageInfo.originalPageIndex]);
+    copiedPage.setRotation(degrees(rotation));
     mergedPdf.addPage(copiedPage);
   }
 
