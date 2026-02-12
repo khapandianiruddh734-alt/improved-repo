@@ -24,8 +24,8 @@ const createClient = () => {
 // --- AI SHEET HEADERS (11 COLUMNS) ---
 const AI_SHEET_HEADERS = ["Name", "Item_Online_DisplayName", "Variation_Name", "Price", "Category", "Category_Online_DisplayName", "Short_Code", "Short_Code_2", "Description", "Attributes", "Goods_Services"];
 
-// --- MANUAL SHEET HEADERS (USER FORMAT) ---
-const MANUAL_SHEET_HEADERS = [
+// --- AI OCR TO EXCEL HEADERS (LATEST USER FORMAT) ---
+const OCR_EXCEL_HEADERS = [
   "Name",
   "Online_Name",
   "Description",
@@ -65,7 +65,7 @@ VARIATION & ITEM SPLIT RULES (FOR EXTRACTION):
 `;
 
 const MANUAL_SHEET_SYSTEM_PROMPT = `Act as a Menu Data Digitization Expert. 
-YOU MUST USE THE EXACT 40-COLUMN HEADER STRUCTURE PROVIDED BELOW.
+YOU MUST USE THE EXACT HEADER STRUCTURE PROVIDED BELOW.
 
 STRICT VARIATION RULES FOR MANUAL SHEET:
 1. KEEP PREVIOUS VARIATION LOGIC: Preserve the same variation extraction behavior as before.
@@ -83,7 +83,7 @@ STRICT VARIATION RULES FOR MANUAL SHEET:
 7. NO NULLS: Use empty string "" for missing values.
 
 EXACT HEADERS:
-${JSON.stringify(MANUAL_SHEET_HEADERS)}`;
+${JSON.stringify(OCR_EXCEL_HEADERS)}`;
 
 const AI_FIXER_SYSTEM_PROMPT = `Act as a professional Menu Data Correction Expert. 
 STRICT OPERATIONAL LIMITS:
@@ -92,10 +92,13 @@ STRICT OPERATIONAL LIMITS:
 3. JSON OUTPUT: Return a JSON array of arrays starting with the 11-column header.
 HEADER (11 COLUMNS): ${JSON.stringify(AI_SHEET_HEADERS)}`;
 
-const AI_SHEET_SYSTEM_PROMPT = `Act as a professional Menu Data Digitization Expert. 
-HEADER (11 COLUMNS): ${JSON.stringify(AI_SHEET_HEADERS)}
-- Category_Online_DisplayName: Sequential number.
-- Goods_Services: "Services".`;
+const AI_SHEET_SYSTEM_PROMPT = `Act as a professional Menu Data Digitization Expert.
+YOU MUST OUTPUT THE EXACT HEADER BELOW AS FIRST ROW.
+KEEP PREVIOUS VARIATION EXTRACTION LOGIC INTACT.
+NO NULLS: Use empty string "" for missing values.
+
+EXACT HEADERS:
+${JSON.stringify(OCR_EXCEL_HEADERS)}`;
 
 export async function aiLabSmartParse(text: string): Promise<any[]> {
   const startTime = Date.now();
@@ -187,10 +190,8 @@ export async function aiExtractToExcel(inputs: { data: string, mimeType: string,
     });
     const raw = JSON.parse(response.text || "[[]]");
     const result = Array.isArray(raw) ? raw : [[]];
-    if (mode === 'manual') {
-      // Enforce exact requested header format while keeping extracted rows untouched.
-      result[0] = MANUAL_SHEET_HEADERS;
-    }
+    // Enforce exact latest header format (no trimming/renaming) while keeping rows untouched.
+    result[0] = OCR_EXCEL_HEADERS;
     apiTracker.logRequest({ tool: `AI OCR to Excel (${mode})`, model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: inputs.length, fileFormats: inputs.map(i => i.mimeType.split('/').pop() || 'unknown'), inputTokens: response.usageMetadata?.promptTokenCount, outputTokens: response.usageMetadata?.candidatesTokenCount, accuracyScore: apiTracker.calculateAccuracy(result) });
     return result;
   } catch (e: any) { throw e; }
