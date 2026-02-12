@@ -249,6 +249,11 @@ function normalizeManualSheetResult(rawTable: any[][]): any[][] {
 
   const fixedLen = MANUAL_FIXED_HEADERS.length;
   const blockLen = VARIATION_BLOCK_HEADERS.length;
+  const nameIdx = 0;
+  const onlineNameIdx = 1;
+  const parentCategoryIdx = 7;
+  const categoryIdx = 8;
+  const priceIdx = 10;
 
   const grouped = new Map<string, { base: string[]; blocks: string[][] }>();
 
@@ -256,8 +261,13 @@ function normalizeManualSheetResult(rawTable: any[][]): any[][] {
     const row = [...sourceRow];
     while (row.length < fixedLen + blockLen) row.push("");
 
-    const base = row.slice(0, fixedLen);
-    const key = JSON.stringify(base.map(v => v.trim().toLowerCase()));
+    const base = row.slice(0, fixedLen).map(v => String(v ?? ""));
+    const key = [
+      base[nameIdx],
+      base[onlineNameIdx],
+      base[parentCategoryIdx],
+      base[categoryIdx],
+    ].map(v => v.trim().toLowerCase()).join("|");
 
     const blocks: string[][] = [];
     for (let i = fixedLen; i < row.length; i += blockLen) {
@@ -267,6 +277,9 @@ function normalizeManualSheetResult(rawTable: any[][]): any[][] {
         row[i + 2] || "",
         row[i + 3] || "",
       ];
+      if (block[0].trim() !== "" && block[1].trim() === "" && base[priceIdx].trim() !== "") {
+        block[1] = base[priceIdx];
+      }
       if (block.some(v => String(v).trim() !== "")) {
         blocks.push(block);
       }
@@ -274,9 +287,24 @@ function normalizeManualSheetResult(rawTable: any[][]): any[][] {
 
     if (!grouped.has(key)) {
       grouped.set(key, { base: [...base], blocks: [] });
+    } else {
+      // Keep the most complete item record while still merging into one row per item name.
+      const existing = grouped.get(key)!;
+      for (let i = 0; i < fixedLen; i++) {
+        if (existing.base[i].trim() === "" && base[i].trim() !== "") {
+          existing.base[i] = base[i];
+        }
+      }
     }
+
     const current = grouped.get(key)!;
-    current.blocks.push(...blocks);
+    for (const block of blocks) {
+      const signature = block.map(v => v.trim().toLowerCase()).join("|");
+      const alreadyExists = current.blocks.some(
+        b => b.map(v => v.trim().toLowerCase()).join("|") === signature
+      );
+      if (!alreadyExists) current.blocks.push(block);
+    }
   }
 
   let maxBlocks = 1;
@@ -284,6 +312,9 @@ function normalizeManualSheetResult(rawTable: any[][]): any[][] {
 
   for (const entry of grouped.values()) {
     const blocks = entry.blocks.length > 0 ? entry.blocks : [["", "", "", ""]];
+    if (entry.blocks.length > 0) {
+      entry.base[priceIdx] = "0";
+    }
     maxBlocks = Math.max(maxBlocks, blocks.length);
     mergedRows.push([...entry.base, ...blocks.flat()]);
   }
