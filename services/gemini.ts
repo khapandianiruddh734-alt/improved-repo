@@ -134,12 +134,17 @@ STRICT OPERATIONAL LIMITS:
 HEADER (11 COLUMNS): ${JSON.stringify(AI_SHEET_HEADERS)}`;
 
 const AI_SHEET_SYSTEM_PROMPT = `Act as a professional Menu Data Digitization Expert.
-YOU MUST OUTPUT THE EXACT HEADER BELOW AS FIRST ROW.
-KEEP PREVIOUS VARIATION EXTRACTION LOGIC INTACT.
+YOU MUST OUTPUT THE EXACT 11-COLUMN HEADER BELOW AS FIRST ROW.
+AI SHEET VARIATION RULES:
+1. Use this structure only: Name, Item_Online_DisplayName, Variation_Name, Price, Category, Category_Online_DisplayName, Short_Code, Short_Code_2, Description, Attributes, Goods_Services.
+2. If an item has variations, create one parent row first (Variation_Name empty, Price = 0), then add each variation in separate rows below it.
+3. Keep all variations vertical (down rows), never horizontal in extra columns.
+4. Do NOT use Veg/Non-Veg as variations. If dietary type differs, create separate item rows.
+5. If item name has slash pattern (e.g., "Coffee Hot/Cold"), remove slash from item name, keep base item (e.g., "Coffee"), and put split parts as variations.
 NO NULLS: Use empty string "" for missing values.
 
 EXACT HEADERS:
-${JSON.stringify(OCR_EXCEL_HEADERS)}`;
+${JSON.stringify(AI_SHEET_HEADERS)}`;
 
 export async function aiLabSmartParse(text: string): Promise<any[]> {
   const startTime = Date.now();
@@ -235,12 +240,132 @@ export async function aiExtractToExcel(inputs: { data: string, mimeType: string,
     if (mode === 'manual') {
       finalResult = normalizeManualSheetResult(result);
     } else {
-      // AI mode keeps the fixed latest OCR header.
-      finalResult[0] = OCR_EXCEL_HEADERS;
+      finalResult = normalizeAiSheetResult(result);
     }
     apiTracker.logRequest({ tool: `AI OCR to Excel (${mode})`, model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: inputs.length, fileFormats: inputs.map(i => i.mimeType.split('/').pop() || 'unknown'), inputTokens: response.usageMetadata?.promptTokenCount, outputTokens: response.usageMetadata?.candidatesTokenCount, accuracyScore: apiTracker.calculateAccuracy(finalResult) });
     return finalResult;
   } catch (e: any) { throw e; }
+}
+
+function normalizeAiSheetResult(rawTable: any[][]): any[][] {
+  const rows = Array.isArray(rawTable) ? rawTable : [];
+  const dataRows = rows.slice(1).map(r => Array.isArray(r) ? r.map(cell => String(cell ?? "")) : []);
+
+  const headerLen = AI_SHEET_HEADERS.length;
+  const nameIdx = 0;
+  const onlineNameIdx = 1;
+  const variationIdx = 2;
+  const priceIdx = 3;
+  const categoryIdx = 4;
+  const categoryOnlineIdx = 5;
+
+  const grouped = new Map<string, string[][]>();
+
+  for (const sourceRow of dataRows) {
+    const row = [...sourceRow];
+    while (row.length < headerLen) row.push("");
+    const trimmed = row.slice(0, headerLen).map(v => String(v ?? ""));
+
+    const slashSplit = splitNameSlashToVariations(trimmed[nameIdx]);
+    const expandedRows: string[][] = [];
+
+    if (slashSplit && trimmed[variationIdx].trim() === "") {
+      const parent = [...trimmed];
+      parent[nameIdx] = slashSplit.base;
+      if (parent[onlineNameIdx].trim() === "" || parent[onlineNameIdx].includes("/")) {
+        parent[onlineNameIdx] = slashSplit.base;
+      }
+      parent[variationIdx] = "";
+      parent[priceIdx] = "0";
+      expandedRows.push(parent);
+
+      for (const variation of slashSplit.variations) {
+        const vRow = [...trimmed];
+        vRow[nameIdx] = slashSplit.base;
+        if (vRow[onlineNameIdx].trim() === "" || vRow[onlineNameIdx].includes("/")) {
+          vRow[onlineNameIdx] = slashSplit.base;
+        }
+        vRow[variationIdx] = variation;
+        expandedRows.push(vRow);
+      }
+    } else {
+      if (slashSplit) {
+        trimmed[nameIdx] = slashSplit.base;
+        if (trimmed[onlineNameIdx].trim() === "" || trimmed[onlineNameIdx].includes("/")) {
+          trimmed[onlineNameIdx] = slashSplit.base;
+        }
+      }
+      expandedRows.push(trimmed);
+    }
+
+    for (const normalized of expandedRows) {
+      const key = [
+        normalized[nameIdx],
+        normalized[onlineNameIdx],
+        normalized[categoryIdx],
+        normalized[categoryOnlineIdx],
+      ].map(v => v.trim().toLowerCase()).join("|");
+
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key)!.push(normalized);
+    }
+  }
+
+  const normalizedRows: string[][] = [];
+
+  for (const groupRows of grouped.values()) {
+    const parentCandidates = groupRows.filter(r => r[variationIdx].trim() === "");
+    const variationRows = groupRows.filter(r => r[variationIdx].trim() !== "");
+
+    if (variationRows.length === 0) {
+      normalizedRows.push(...groupRows);
+      continue;
+    }
+
+    const parent = parentCandidates[0] ? [...parentCandidates[0]] : [...variationRows[0]];
+    parent[variationIdx] = "";
+    parent[priceIdx] = "0";
+    normalizedRows.push(parent);
+
+    for (const vRow of variationRows) {
+      normalizedRows.push(vRow);
+    }
+  }
+
+  return [AI_SHEET_HEADERS, ...normalizedRows];
+}
+
+function splitNameSlashToVariations(name: string): { base: string; variations: string[] } | null {
+  if (!name || !name.includes("/")) return null;
+
+  const normalized = name.replace(/\s*\/\s*/g, "/").trim();
+  const parts = normalized.split("/").map(p => p.trim()).filter(Boolean);
+  if (parts.length < 2) return null;
+
+  const firstWords = parts[0].split(/\s+/).filter(Boolean);
+  if (firstWords.length === 0) return null;
+  const base = firstWords[0];
+
+  const prefix = new RegExp(`^${escapeRegExp(base)}\\s+`, "i");
+  const variations = parts
+    .map(part => part.replace(prefix, "").trim())
+    .filter(v => v !== "" && v.toLowerCase() !== base.toLowerCase());
+
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const variation of variations) {
+    const key = variation.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(variation);
+  }
+
+  if (unique.length === 0) return null;
+  return { base, variations: unique };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function normalizeManualSheetResult(rawTable: any[][]): any[][] {
