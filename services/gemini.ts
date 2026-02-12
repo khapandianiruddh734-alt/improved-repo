@@ -24,14 +24,38 @@ const createClient = () => {
 // --- AI SHEET HEADERS (11 COLUMNS) ---
 const AI_SHEET_HEADERS = ["Name", "Item_Online_DisplayName", "Variation_Name", "Price", "Category", "Category_Online_DisplayName", "Short_Code", "Short_Code_2", "Description", "Attributes", "Goods_Services"];
 
-// --- MANUAL SHEET HEADERS (40 COLUMNS) ---
+// --- MANUAL SHEET HEADERS (USER FORMAT) ---
 const MANUAL_SHEET_HEADERS = [
-  "Name", "Online_Nam", "Description", "Short_Code", "Short_Code", "Sap_Code", "HSN_Code", "Parent_Cat", "Category", "Category_o", 
-  "Price", "Attributes", "Goods_Sen", "GST% (Allo", "Type (F=for", "(Optional)", "Unit", "is_Self_Iter", "minimum_s", "at_par_stoc", 
-  "Rank", "Packing_Ch", "Allow_Deci", "Addon_Gro", "Addon_Gro", "Addon_Gro", "Addon_Gro", "Variation_g", 
-  "Variation", "Variation_P", "Variation_S", "Variation_P", 
-  "Variation", "Variation_P", "Variation_S", "Variation_P", 
-  "Variation", "Variation_P", "Variation_S", "Variation_P"
+  "Name",
+  "Online_Name",
+  "Description",
+  "Short_Code",
+  "Short_Code_2",
+  "Sap_Code",
+  "HSN_Code",
+  "Parent_Category",
+  "Category",
+  "Category_online_display",
+  "Price",
+  "Attributes",
+  "Goods_Services",
+  "Unit",
+  "is_Self_Item_Recipe",
+  "minimum_stock_level",
+  "at_par_stock_level",
+  "Rank",
+  "Packing_Charges",
+  "Allow_Decimal_Qty",
+  "Addon_Group_Name",
+  "Addon_Group_Selection",
+  "Addon_Group_Min",
+  "Addon_Group_Max",
+  "Variation_group_name",
+  "Variation",
+  "Variation_Price",
+  "Variation_Sap_Code",
+  "Variation_Packing_Charges",
+  "#If there is a need for addon in variation than enter from this column onwards"
 ];
 
 const VARIATION_DIETARY_RULE = `
@@ -44,16 +68,21 @@ const MANUAL_SHEET_SYSTEM_PROMPT = `Act as a Menu Data Digitization Expert.
 YOU MUST USE THE EXACT 40-COLUMN HEADER STRUCTURE PROVIDED BELOW.
 
 STRICT VARIATION RULES FOR MANUAL SHEET:
-1. HORIZONTAL VARIATIONS: If an item has up to 3 variations (e.g., Small, Medium, Large), place them horizontally in the Variation columns:
-   - Variation Set 1: Columns 29-32
-   - Variation Set 2: Columns 33-36
-   - Variation Set 3: Columns 37-40
-2. DIETARY SPLIT: If variations are dietary (e.g., Veg / Chicken), you MUST still create SEPARATE rows.
-3. MAIN PRICE: If an item has variations in columns 29-40, set the main "Price" (Column 11) to "0".
-4. PRESERVE HEADER: The first row of your JSON array MUST be the exact headers provided below.
-5. NO NULLS: Use empty string "" for missing values.
+1. KEEP PREVIOUS VARIATION LOGIC: Preserve the same variation extraction behavior as before.
+2. PRIMARY VARIATION SLOT: Put the first variation in these columns:
+   - Variation_group_name
+   - Variation
+   - Variation_Price
+   - Variation_Sap_Code
+   - Variation_Packing_Charges
+3. ADDITIONAL VARIATIONS / ADDON-IN-VARIATION: If more variation blocks are needed, continue to the right starting from:
+   - "#If there is a need for addon in variation than enter from this column onwards"
+4. DIETARY SPLIT: If variations are dietary (e.g., Veg / Chicken), you MUST create separate rows.
+5. MAIN PRICE: If item-level variations exist, set the main "Price" to "0".
+6. PRESERVE HEADER: The first row MUST be the exact headers below.
+7. NO NULLS: Use empty string "" for missing values.
 
-EXACT HEADERS (40 COLUMNS): 
+EXACT HEADERS:
 ${JSON.stringify(MANUAL_SHEET_HEADERS)}`;
 
 const AI_FIXER_SYSTEM_PROMPT = `Act as a professional Menu Data Correction Expert. 
@@ -156,7 +185,12 @@ export async function aiExtractToExcel(inputs: { data: string, mimeType: string,
         responseSchema: { type: Type.ARRAY, items: { type: Type.ARRAY, items: { type: Type.STRING } } }
       }
     });
-    const result = JSON.parse(response.text || "[[]]");
+    const raw = JSON.parse(response.text || "[[]]");
+    const result = Array.isArray(raw) ? raw : [[]];
+    if (mode === 'manual') {
+      // Enforce exact requested header format while keeping extracted rows untouched.
+      result[0] = MANUAL_SHEET_HEADERS;
+    }
     apiTracker.logRequest({ tool: `AI OCR to Excel (${mode})`, model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: inputs.length, fileFormats: inputs.map(i => i.mimeType.split('/').pop() || 'unknown'), inputTokens: response.usageMetadata?.promptTokenCount, outputTokens: response.usageMetadata?.candidatesTokenCount, accuracyScore: apiTracker.calculateAccuracy(result) });
     return result;
   } catch (e: any) { throw e; }

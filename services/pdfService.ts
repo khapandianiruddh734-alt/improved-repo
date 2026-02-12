@@ -11,23 +11,37 @@ declare const XLSX: any;
  * JPG/PNG to PDF
  */
 export async function imagesToPdf(files: File[]): Promise<Blob> {
-  const doc = new jspdf.jsPDF();
+  if (files.length === 0) {
+    throw new Error('No images provided.');
+  }
+
+  let doc: any;
+
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     const imgData = await fileToDataUrl(file);
     const img = await loadImage(imgData);
-    
-    const pageWidth = doc.internal.pageSize.getWidth();
-    const pageHeight = doc.internal.pageSize.getHeight();
-    const ratio = Math.min(pageWidth / img.width, pageHeight / img.height);
-    const w = img.width * ratio;
-    const h = img.height * ratio;
-    const x = (pageWidth - w) / 2;
-    const y = (pageHeight - h) / 2;
 
-    if (i > 0) doc.addPage();
-    doc.addImage(imgData, 'JPEG', x, y, w, h);
+    // Keep each page in the same orientation/aspect as the source image.
+    const pageWidth = img.naturalWidth || img.width;
+    const pageHeight = img.naturalHeight || img.height;
+    const orientation = pageWidth > pageHeight ? 'l' : 'p';
+
+    if (!doc) {
+      doc = new jspdf.jsPDF({
+        orientation,
+        unit: 'pt',
+        format: [pageWidth, pageHeight],
+      });
+    } else {
+      doc.addPage([pageWidth, pageHeight], orientation);
+    }
+
+    // Preserve input format behavior (PNG stays PNG, JPEG stays JPEG) with no rotation.
+    const format = file.type === 'image/png' ? 'PNG' : 'JPEG';
+    doc.addImage(imgData, format, 0, 0, pageWidth, pageHeight, undefined, 'NONE', 0);
   }
+
   return doc.output('blob');
 }
 
