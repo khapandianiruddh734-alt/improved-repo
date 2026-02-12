@@ -58,6 +58,42 @@ const OCR_EXCEL_HEADERS = [
   "#If there is a need for addon in variation than enter from this column onwards"
 ];
 
+// Manual sheet fixed item columns (A to Y) + dynamic variation blocks from Z onward.
+const MANUAL_FIXED_HEADERS = [
+  "Name",
+  "Online_Name",
+  "Description",
+  "Short_Code",
+  "Short_Code_2",
+  "Sap_Code",
+  "HSN_Code",
+  "Parent_Category",
+  "Category",
+  "Category_online_display",
+  "Price",
+  "Attributes",
+  "Goods_Services",
+  "Unit",
+  "is_Self_Item_Recipe",
+  "minimum_stock_level",
+  "at_par_stock_level",
+  "Rank",
+  "Packing_Charges",
+  "Allow_Decimal_Qty",
+  "Addon_Group_Name",
+  "Addon_Group_Selection",
+  "Addon_Group_Min",
+  "Addon_Group_Max",
+  "Variation_group_name",
+];
+
+const VARIATION_BLOCK_HEADERS = [
+  "Variation",
+  "Variation_Price",
+  "Variation_Sap_Code",
+  "Variation_Packing_Charges"
+];
+
 const VARIATION_DIETARY_RULE = `
 VARIATION & ITEM SPLIT RULES (FOR EXTRACTION):
 1. DIETARY SPLIT: If slashes represent different dietary types (e.g., "Veg / Chicken"), create SEPARATE items/rows.
@@ -69,21 +105,26 @@ YOU MUST USE THE EXACT HEADER STRUCTURE PROVIDED BELOW.
 
 STRICT VARIATION RULES FOR MANUAL SHEET:
 1. KEEP PREVIOUS VARIATION LOGIC: Preserve the same variation extraction behavior as before.
-2. PRIMARY VARIATION SLOT: Put the first variation in these columns:
+2. ONE ITEM ROW FOR VARIATIONS: If an item has multiple variations, keep ONE item row and place all variations in horizontal blocks.
+3. PRIMARY VARIATION SLOT: Put the first variation in these columns:
    - Variation_group_name
    - Variation
    - Variation_Price
    - Variation_Sap_Code
    - Variation_Packing_Charges
-3. ADDITIONAL VARIATIONS / ADDON-IN-VARIATION: If more variation blocks are needed, continue to the right starting from:
-   - "#If there is a need for addon in variation than enter from this column onwards"
-4. DIETARY SPLIT: If variations are dietary (e.g., Veg / Chicken), you MUST create separate rows.
-5. MAIN PRICE: If item-level variations exist, set the main "Price" to "0".
-6. PRESERVE HEADER: The first row MUST be the exact headers below.
-7. NO NULLS: Use empty string "" for missing values.
+4. SECOND VARIATION START: Add second variation block immediately after AC (after Variation_Packing_Charges).
+5. MORE THAN 2 VARIATIONS: Keep appending the same 4-column block after the previous block:
+   - Variation
+   - Variation_Price
+   - Variation_Sap_Code
+   - Variation_Packing_Charges
+6. DIETARY SPLIT: If variations are dietary (e.g., Veg / Chicken), you MUST create separate rows.
+7. MAIN PRICE: If item-level variations exist, set the main "Price" to "0".
+8. PRESERVE HEADER: The first row MUST be the exact headers below.
+9. NO NULLS: Use empty string "" for missing values.
 
 EXACT HEADERS:
-${JSON.stringify(OCR_EXCEL_HEADERS)}`;
+${JSON.stringify([...MANUAL_FIXED_HEADERS, ...VARIATION_BLOCK_HEADERS])}`;
 
 const AI_FIXER_SYSTEM_PROMPT = `Act as a professional Menu Data Correction Expert. 
 STRICT OPERATIONAL LIMITS:
@@ -190,11 +231,75 @@ export async function aiExtractToExcel(inputs: { data: string, mimeType: string,
     });
     const raw = JSON.parse(response.text || "[[]]");
     const result = Array.isArray(raw) ? raw : [[]];
-    // Enforce exact latest header format (no trimming/renaming) while keeping rows untouched.
-    result[0] = OCR_EXCEL_HEADERS;
-    apiTracker.logRequest({ tool: `AI OCR to Excel (${mode})`, model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: inputs.length, fileFormats: inputs.map(i => i.mimeType.split('/').pop() || 'unknown'), inputTokens: response.usageMetadata?.promptTokenCount, outputTokens: response.usageMetadata?.candidatesTokenCount, accuracyScore: apiTracker.calculateAccuracy(result) });
-    return result;
+    let finalResult = result;
+    if (mode === 'manual') {
+      finalResult = normalizeManualSheetResult(result);
+    } else {
+      // AI mode keeps the fixed latest OCR header.
+      finalResult[0] = OCR_EXCEL_HEADERS;
+    }
+    apiTracker.logRequest({ tool: `AI OCR to Excel (${mode})`, model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: inputs.length, fileFormats: inputs.map(i => i.mimeType.split('/').pop() || 'unknown'), inputTokens: response.usageMetadata?.promptTokenCount, outputTokens: response.usageMetadata?.candidatesTokenCount, accuracyScore: apiTracker.calculateAccuracy(finalResult) });
+    return finalResult;
   } catch (e: any) { throw e; }
+}
+
+function normalizeManualSheetResult(rawTable: any[][]): any[][] {
+  const rows = Array.isArray(rawTable) ? rawTable : [];
+  const dataRows = rows.slice(1).map(r => Array.isArray(r) ? r.map(cell => String(cell ?? "")) : []);
+
+  const fixedLen = MANUAL_FIXED_HEADERS.length;
+  const blockLen = VARIATION_BLOCK_HEADERS.length;
+
+  const grouped = new Map<string, { base: string[]; blocks: string[][] }>();
+
+  for (const sourceRow of dataRows) {
+    const row = [...sourceRow];
+    while (row.length < fixedLen + blockLen) row.push("");
+
+    const base = row.slice(0, fixedLen);
+    const key = JSON.stringify(base.map(v => v.trim().toLowerCase()));
+
+    const blocks: string[][] = [];
+    for (let i = fixedLen; i < row.length; i += blockLen) {
+      const block = [
+        row[i] || "",
+        row[i + 1] || "",
+        row[i + 2] || "",
+        row[i + 3] || "",
+      ];
+      if (block.some(v => String(v).trim() !== "")) {
+        blocks.push(block);
+      }
+    }
+
+    if (!grouped.has(key)) {
+      grouped.set(key, { base: [...base], blocks: [] });
+    }
+    const current = grouped.get(key)!;
+    current.blocks.push(...blocks);
+  }
+
+  let maxBlocks = 1;
+  const mergedRows: string[][] = [];
+
+  for (const entry of grouped.values()) {
+    const blocks = entry.blocks.length > 0 ? entry.blocks : [["", "", "", ""]];
+    maxBlocks = Math.max(maxBlocks, blocks.length);
+    mergedRows.push([...entry.base, ...blocks.flat()]);
+  }
+
+  const dynamicHeaders = [...MANUAL_FIXED_HEADERS];
+  for (let i = 0; i < maxBlocks; i++) {
+    dynamicHeaders.push(...VARIATION_BLOCK_HEADERS);
+  }
+
+  const normalizedRows = mergedRows.map(row => {
+    const padded = [...row];
+    while (padded.length < dynamicHeaders.length) padded.push("");
+    return padded.slice(0, dynamicHeaders.length);
+  });
+
+  return [dynamicHeaders, ...normalizedRows];
 }
 
 export async function aiSummarizeDoc(text: string, images: { data: string, mimeType: string }[] = []): Promise<string> {
