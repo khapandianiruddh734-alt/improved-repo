@@ -1,22 +1,31 @@
 import React, { useState, useEffect } from 'react';
 import { apiTracker } from '../services/apiTracker';
 import { AdminSettings } from '../types';
+import { ApiUsageDashboard } from './admin/ApiUsageDashboard';
+import { UserManager } from './admin/UserManager';
 
 interface AdminDashboardProps {
   onLogout: () => void;
+  user?: { role?: string };
 }
 
-export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
+export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, user }) => {
   const [stats, setStats] = useState(apiTracker.getStats());
   const [settings, setSettings] = useState<AdminSettings>(apiTracker.getSettings());
-  const [activeTab, setActiveTab] = useState<'ops' | 'tools' | 'logs' | 'config'>('ops');
+  const [activeTab, setActiveTab] = useState<'ops' | 'tools' | 'logs' | 'config' | 'api' | 'users'>('ops');
 
   useEffect(() => {
+    if (user?.role !== 'admin') {
+      onLogout();
+      window.location.assign('/');
+      return;
+    }
+
     const interval = setInterval(() => {
       setStats(apiTracker.getStats());
     }, 2000);
     return () => clearInterval(interval);
-  }, []);
+  }, [onLogout, user?.role]);
 
   const handleUpdateSettings = (e: React.FormEvent) => {
     e.preventDefault();
@@ -47,6 +56,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
           <button onClick={() => setActiveTab('ops')} className={`px-5 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all ${activeTab === 'ops' ? 'bg-white text-slate-900' : 'text-slate-400 hover:text-white'}`}>Metrics</button>
           <button onClick={() => setActiveTab('tools')} className={`px-5 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all ${activeTab === 'tools' ? 'bg-white text-slate-900' : 'text-slate-400 hover:text-white'}`}>Tools</button>
           <button onClick={() => setActiveTab('logs')} className={`px-5 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all ${activeTab === 'logs' ? 'bg-white text-slate-900' : 'text-slate-400 hover:text-white'}`}>Logs</button>
+          <button onClick={() => setActiveTab('api')} className={`px-5 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all ${activeTab === 'api' ? 'bg-white text-slate-900' : 'text-slate-400 hover:text-white'}`}>API Usage</button>
+          <button onClick={() => setActiveTab('users')} className={`px-5 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all ${activeTab === 'users' ? 'bg-white text-slate-900' : 'text-slate-400 hover:text-white'}`}>Users</button>
           <button onClick={() => setActiveTab('config')} className={`px-5 py-2.5 rounded-xl text-[10px] font-black uppercase transition-all ${activeTab === 'config' ? 'bg-white text-slate-900' : 'text-slate-400 hover:text-white'}`}>Setup</button>
           <div className="w-px h-6 bg-white/10 mx-1"></div>
           <button onClick={onLogout} className="px-5 py-2.5 rounded-xl text-[10px] font-black uppercase text-rose-400 hover:bg-rose-500 hover:text-white transition-all">Logout</button>
@@ -175,6 +186,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
            </div>
         </div>
       )}
+
+      {activeTab === 'api' && <ApiUsageDashboard />}
+      {activeTab === 'users' && <UserManager />}
 
       {activeTab === 'config' && (
         <div className="bg-white p-12 rounded-[3rem] border border-slate-100 shadow-xl max-w-2xl mx-auto animate-in zoom-in-95">

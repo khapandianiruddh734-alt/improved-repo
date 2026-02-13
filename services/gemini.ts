@@ -1,25 +1,69 @@
 
-import { GoogleGenAI, Type } from "@google/genai";
 import { apiTracker } from "./apiTracker";
 
-// Declare process for TS since we're in a browser environment but using Vite/System injection
-declare const process: {
-  env: {
-    API_KEY: string;
-  };
-};
+type GeminiInlineData = { data: string; mimeType: string };
+type GeminiPart = { text?: string; inlineData?: GeminiInlineData };
 
-/**
- * Creates a new instance of the AI client. 
- * Initializing inside each service call ensures we pick up any runtime changes 
- * to process.env.API_KEY from the selection bridge.
- */
-const createClient = () => {
-  if (!process.env.API_KEY) {
-    throw new Error("API_KEY is not defined in the environment.");
+const CLIENT_USER_KEY = "achievers_api_user_id";
+const CLIENT_USER_EMAIL_KEY = "achievers_api_user_email";
+
+function getOrCreateUserId(): string {
+  const preferred = localStorage.getItem(CLIENT_USER_EMAIL_KEY);
+  if (preferred && preferred.includes("@")) return preferred.trim().toLowerCase();
+
+  const legacy = localStorage.getItem(CLIENT_USER_KEY);
+  if (legacy && legacy.includes("@")) return legacy.trim().toLowerCase();
+
+  const fallback = "guest@local.app";
+  localStorage.setItem(CLIENT_USER_EMAIL_KEY, fallback);
+  localStorage.setItem(CLIENT_USER_KEY, fallback);
+  return fallback;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function runProtectedGemini(prompt: string, parts: GeminiPart[] = [], retries = 2): Promise<string> {
+  const userId = getOrCreateUserId();
+
+  let attempt = 0;
+  let lastError: any = null;
+  while (attempt <= retries) {
+    try {
+      const response = await fetch('/api/gemini', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, userId, parts }),
+      });
+
+      if (response.ok) {
+        const payload = await response.json();
+        return String(payload?.text || "");
+      }
+
+      if (response.status === 429 && attempt < retries) {
+        attempt += 1;
+        await delay(250 * attempt);
+        continue;
+      }
+
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload?.error || `Gemini request failed (${response.status})`);
+    } catch (error: any) {
+      lastError = error;
+      const networkError = !error?.message;
+      if (attempt < retries && networkError) {
+        attempt += 1;
+        await delay(250 * attempt);
+        continue;
+      }
+      throw error;
+    }
   }
-  return new GoogleGenAI({ apiKey: process.env.API_KEY });
-};
+
+  throw lastError || new Error("Gemini request failed");
+}
 
 // --- AI SHEET HEADERS (11 COLUMNS) ---
 const AI_SHEET_HEADERS = ["Name", "Item_Online_DisplayName", "Variation_Name", "Price", "Category", "Category_Online_DisplayName", "Short_Code", "Short_Code_2", "Description", "Attributes", "Goods_Services"];
@@ -148,93 +192,54 @@ ${JSON.stringify(AI_SHEET_HEADERS)}`;
 
 export async function aiLabSmartParse(text: string): Promise<any[]> {
   const startTime = Date.now();
-  const ai = createClient();
   const model = 'gemini-3-flash-preview';
   try {
-    const response = await ai.models.generateContent({
-      model,
-      contents: `Extract menu items from: ${text}\n\n${VARIATION_DIETARY_RULE}`,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              category: { type: Type.STRING },
-              name: { type: Type.STRING },
-              variation: { type: Type.STRING },
-              attributes: { type: Type.STRING },
-              price: { type: Type.STRING },
-              description: { type: Type.STRING }
-            },
-            required: ["category", "name", "attributes", "price"]
-          }
-        }
-      }
-    });
-    const result = JSON.parse(response.text || "[]");
-    apiTracker.logRequest({ tool: 'AI Lab Smart Parse', model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: 1, fileFormats: ['txt'], inputTokens: response.usageMetadata?.promptTokenCount, outputTokens: response.usageMetadata?.candidatesTokenCount });
+    const prompt = `Extract menu items from: ${text}\n\n${VARIATION_DIETARY_RULE}\nReturn JSON array only.`;
+    const raw = await runProtectedGemini(prompt);
+    const result = JSON.parse(raw || "[]");
+    apiTracker.logRequest({ tool: 'AI Lab Smart Parse', model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: 1, fileFormats: ['txt'] });
     return result;
   } catch (e: any) { throw e; }
 }
 
 export async function aiFixMenuData(data: any[][]): Promise<any[][]> {
   const startTime = Date.now();
-  const ai = createClient();
   const model = 'gemini-3-flash-preview';
   try {
-    const response = await ai.models.generateContent({
-      model,
-      contents: `${AI_FIXER_SYSTEM_PROMPT}\n\nInput Data: ${JSON.stringify(data)}`,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: { type: Type.ARRAY, items: { type: Type.ARRAY, items: { type: Type.STRING } } }
-      }
-    });
-    const result = JSON.parse(response.text || "[]");
-    apiTracker.logRequest({ tool: 'AI Menu Fixer', model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: 1, fileFormats: ['xlsx'], inputTokens: response.usageMetadata?.promptTokenCount, outputTokens: response.usageMetadata?.candidatesTokenCount, accuracyScore: apiTracker.calculateAccuracy(result) });
+    const prompt = `${AI_FIXER_SYSTEM_PROMPT}\n\nInput Data: ${JSON.stringify(data)}\nReturn JSON only.`;
+    const raw = await runProtectedGemini(prompt);
+    const result = JSON.parse(raw || "[]");
+    apiTracker.logRequest({ tool: 'AI Menu Fixer', model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: 1, fileFormats: ['xlsx'], accuracyScore: apiTracker.calculateAccuracy(result) });
     return result;
   } catch (e: any) { throw e; }
 }
 
 export async function aiTranslateData(data: any[][], targetLanguage: string, scope: 'names' | 'categories' | 'both'): Promise<any[][]> {
   const startTime = Date.now();
-  const ai = createClient();
   const model = 'gemini-3-flash-preview';
   try {
-    const response = await ai.models.generateContent({
-      model,
-      contents: `Translate to ${targetLanguage}. Scope: ${scope}. Data: ${JSON.stringify(data)}`,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: { type: Type.ARRAY, items: { type: Type.ARRAY, items: { type: Type.STRING } } }
-      }
-    });
-    const result = JSON.parse(response.text || "[]");
-    apiTracker.logRequest({ tool: `AI Translator`, model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: 1, fileFormats: ['xlsx'], inputTokens: response.usageMetadata?.promptTokenCount, outputTokens: response.usageMetadata?.candidatesTokenCount });
+    const prompt = `Translate to ${targetLanguage}. Scope: ${scope}. Data: ${JSON.stringify(data)}. Return JSON only.`;
+    const raw = await runProtectedGemini(prompt);
+    const result = JSON.parse(raw || "[]");
+    apiTracker.logRequest({ tool: `AI Translator`, model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: 1, fileFormats: ['xlsx'] });
     return result;
   } catch (e: any) { throw e; }
 }
 
 export async function aiExtractToExcel(inputs: { data: string, mimeType: string, text?: string }[], language: string, mode: 'ai' | 'manual', isDeepScan: boolean): Promise<any[][]> {
   const startTime = Date.now();
-  const ai = createClient();
   const model = 'gemini-3-flash-preview';
   const systemPrompt = mode === 'ai' ? AI_SHEET_SYSTEM_PROMPT : MANUAL_SHEET_SYSTEM_PROMPT;
   const deepPrompt = isDeepScan ? "\nDEEP SCAN: Pay extra attention to handwritten or complex layouts." : "";
   try {
-    const parts: any[] = inputs.map(input => input.text ? { text: input.text } : { inlineData: { data: input.data, mimeType: input.mimeType } });
-    parts.push({ text: `${systemPrompt}${deepPrompt}\nLanguage: ${language}. Extract all items as a consolidated table starting with the headers provided.` });
-    const response = await ai.models.generateContent({
-      model,
-      contents: { parts },
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: { type: Type.ARRAY, items: { type: Type.ARRAY, items: { type: Type.STRING } } }
-      }
-    });
-    const raw = JSON.parse(response.text || "[[]]");
+    const parts: GeminiPart[] = inputs.map(input => (
+      input.text
+        ? { text: input.text }
+        : { inlineData: { data: input.data, mimeType: input.mimeType } }
+    ));
+    const prompt = `${systemPrompt}${deepPrompt}\nLanguage: ${language}. Extract all items as a consolidated table starting with the headers provided. Return JSON array only.`;
+    const responseText = await runProtectedGemini(prompt, parts);
+    const raw = JSON.parse(responseText || "[[]]");
     const result = Array.isArray(raw) ? raw : [[]];
     let finalResult = result;
     if (mode === 'manual') {
@@ -242,7 +247,7 @@ export async function aiExtractToExcel(inputs: { data: string, mimeType: string,
     } else {
       finalResult = normalizeAiSheetResult(result);
     }
-    apiTracker.logRequest({ tool: `AI OCR to Excel (${mode})`, model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: inputs.length, fileFormats: inputs.map(i => i.mimeType.split('/').pop() || 'unknown'), inputTokens: response.usageMetadata?.promptTokenCount, outputTokens: response.usageMetadata?.candidatesTokenCount, accuracyScore: apiTracker.calculateAccuracy(finalResult) });
+    apiTracker.logRequest({ tool: `AI OCR to Excel (${mode})`, model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: inputs.length, fileFormats: inputs.map(i => i.mimeType.split('/').pop() || 'unknown'), accuracyScore: apiTracker.calculateAccuracy(finalResult) });
     return finalResult;
   } catch (e: any) { throw e; }
 }
@@ -460,15 +465,13 @@ function normalizeManualSheetResult(rawTable: any[][]): any[][] {
 
 export async function aiSummarizeDoc(text: string, images: { data: string, mimeType: string }[] = []): Promise<string> {
   const startTime = Date.now();
-  const ai = createClient();
   const model = images.length > 0 ? 'gemini-3-pro-preview' : 'gemini-3-flash-preview';
   try {
-    const parts: any[] = [];
+    const parts: GeminiPart[] = [];
     if (text) parts.push({ text: text.substring(0, 15000) });
     images.forEach(img => parts.push({ inlineData: { data: img.data, mimeType: img.mimeType } }));
-    parts.push({ text: `Analyze document pricing, trends, and dish composition.` });
-    const response = await ai.models.generateContent({ model, contents: { parts } });
-    apiTracker.logRequest({ tool: 'AI Summarizer', model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: 1 + images.length, fileFormats: ['mixed'], inputTokens: response.usageMetadata?.promptTokenCount, outputTokens: response.usageMetadata?.candidatesTokenCount });
-    return response.text || "Summary failed.";
+    const responseText = await runProtectedGemini(`Analyze document pricing, trends, and dish composition.`, parts);
+    apiTracker.logRequest({ tool: 'AI Summarizer', model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: 1 + images.length, fileFormats: ['mixed'] });
+    return responseText || "Summary failed.";
   } catch (e: any) { throw e; }
 }

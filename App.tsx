@@ -96,7 +96,7 @@ export default function App() {
             <span className="mr-2 transition-transform group-hover:-translate-x-1">←</span> 
             Back to Dashboard
           </button>
-          <AdminDashboard onLogout={handleLogout} />
+          <AdminDashboard onLogout={handleLogout} user={{ role: 'admin' }} />
         </div>
       ) : !selectedTool ? (
         <div className="animate-in fade-in duration-700">
