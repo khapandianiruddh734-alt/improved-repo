@@ -53,7 +53,8 @@ export default async function handler(req: any, res: any) {
     statsCache = { timestamp: now, payload };
 
     return res.status(200).json(payload);
-  } catch {
+  } catch (error: any) {
+    console.error('[api/stats] failed:', error?.message || error);
     return res.status(500).json({ users: [], total: 0 });
   }
 }

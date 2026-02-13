@@ -54,7 +54,8 @@ export default async function handler(req: any, res: any) {
     }
 
     return res.status(405).json({ error: 'Method not allowed' });
-  } catch {
+  } catch (error: any) {
+    console.error('[api/users] failed:', error?.message || error);
     return res.status(500).json({ error: 'Unable to process user request' });
   }
 }

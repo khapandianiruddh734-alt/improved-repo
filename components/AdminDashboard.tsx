@@ -35,6 +35,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, user }
 
   const rpmUsage = (stats.rpm / stats.rpmLimit) * 100;
   const dailyUsage = (stats.dailyUsed / stats.dailyLimit) * 100;
+  const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+  const last24hLogs = apiTracker.getLogs().filter(log => !log.isAlert && log.timestamp >= oneDayAgo);
+
+  const activityByDate: Record<string, Record<string, number>> = {};
+  last24hLogs.forEach(log => {
+    const day = new Date(log.timestamp).toLocaleDateString();
+    if (!activityByDate[day]) activityByDate[day] = {};
+    activityByDate[day][log.tool] = (activityByDate[day][log.tool] || 0) + 1;
+  });
+  const activityDates = Object.keys(activityByDate).sort((a, b) => {
+    const da = new Date(a).getTime();
+    const db = new Date(b).getTime();
+    return db - da;
+  });
+  const mostRecentTool = last24hLogs.length > 0 ? last24hLogs[0] : null;
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-6 duration-700 pb-20">
@@ -141,9 +156,39 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, user }
       )}
 
       {activeTab === 'logs' && (
-        <div className="bg-white rounded-[2.5rem] border border-slate-100 shadow-xl overflow-hidden animate-in fade-in">
-           <div className="overflow-x-auto">
-             <table className="w-full text-left text-sm">
+        <div className="space-y-6 animate-in fade-in">
+          <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-xl">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-xl font-black text-slate-900 tracking-tight">Tool Request Count (Last 24 Hours)</h3>
+              {mostRecentTool && (
+                <span className="text-[10px] font-black uppercase tracking-widest text-indigo-600">
+                  Recent: {mostRecentTool.tool} • {new Date(mostRecentTool.timestamp).toLocaleTimeString()}
+                </span>
+              )}
+            </div>
+            {activityDates.length === 0 ? (
+              <p className="text-sm font-bold text-slate-400">No tool requests in the last 24 hours.</p>
+            ) : (
+              <div className="space-y-6">
+                {activityDates.map((date) => (
+                  <div key={date} className="border-b border-slate-100 pb-4 last:border-0">
+                    <p className="text-[11px] font-black text-slate-600 mb-2">{date}</p>
+                    <div className="space-y-1">
+                      {Object.entries(activityByDate[date]).map(([tool, count]) => (
+                        <p key={`${date}-${tool}`} className="text-[12px] font-bold text-slate-700">
+                          {tool} requests: {count}
+                        </p>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-[2.5rem] border border-slate-100 shadow-xl overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
                 <thead className="bg-slate-50 text-[9px] font-black text-slate-400 uppercase tracking-widest">
                   <tr>
                     <th className="px-8 py-5">Intel ID</th>
@@ -162,28 +207,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout, user }
                       </td>
                       <td className="px-8 py-5">
                         <div className="flex gap-6">
-                           <div className="text-[10px]">
-                              <span className="text-slate-400 uppercase font-black text-[8px] block mb-1">I/O Tokens</span>
-                              <span className="font-bold text-slate-700">{log.inputTokens || 0}i / {log.outputTokens || 0}o</span>
-                           </div>
-                           <div className="text-[10px]">
-                              <span className="text-slate-400 uppercase font-black text-[8px] block mb-1">Fidelity</span>
-                              <span className={`font-bold ${(log.accuracyScore || 100) > 80 ? 'text-emerald-600' : 'text-rose-500'}`}>{log.accuracyScore ?? 100}%</span>
-                           </div>
+                          <div className="text-[10px]">
+                            <span className="text-slate-400 uppercase font-black text-[8px] block mb-1">I/O Tokens</span>
+                            <span className="font-bold text-slate-700">{log.inputTokens || 0}i / {log.outputTokens || 0}o</span>
+                          </div>
+                          <div className="text-[10px]">
+                            <span className="text-slate-400 uppercase font-black text-[8px] block mb-1">Fidelity</span>
+                            <span className={`font-bold ${(log.accuracyScore || 100) > 80 ? 'text-emerald-600' : 'text-rose-500'}`}>{log.accuracyScore ?? 100}%</span>
+                          </div>
                         </div>
                       </td>
                       <td className="px-8 py-5">
                         <div className="flex flex-col gap-1">
                           <span className={`w-fit px-2.5 py-1 rounded-lg text-[9px] font-black uppercase ${log.status === 'success' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-rose-50 text-rose-600 border border-rose-100'}`}>
-                             {log.status === 'error' ? log.errorCategory : 'Validated'}
+                            {log.status === 'error' ? log.errorCategory : 'Validated'}
                           </span>
                         </div>
                       </td>
                     </tr>
                   ))}
                 </tbody>
-             </table>
-           </div>
+              </table>
+            </div>
+          </div>
         </div>
       )}
 

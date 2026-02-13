@@ -1,5 +1,12 @@
-const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_URL;
-const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.REDIS_TOKEN;
+function sanitizeEnv(value?: string): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  // Handles accidental quoted values from dashboard copy/paste.
+  return trimmed.replace(/^["']|["']$/g, "");
+}
+
+const REDIS_URL = sanitizeEnv(process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_URL);
+const REDIS_TOKEN = sanitizeEnv(process.env.UPSTASH_REDIS_REST_TOKEN || process.env.REDIS_TOKEN);
 
 function assertRedisEnv(): void {
   if (!REDIS_URL || !REDIS_TOKEN) {
