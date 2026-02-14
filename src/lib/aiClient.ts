@@ -1,6 +1,7 @@
 const AI_API_KEY = process.env.AI_API_KEY;
+const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-2.0-flash").trim();
 const GEMINI_URL =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent";
+  `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
 
 export async function runAI(prompt: string): Promise<string> {
   if (!AI_API_KEY) {
@@ -30,4 +31,3 @@ export async function runAI(prompt: string): Promise<string> {
 
   return text;
 }
-

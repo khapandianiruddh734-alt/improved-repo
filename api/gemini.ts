@@ -1,4 +1,4 @@
-import { redisCommand } from '../src/lib/cache';
+import { redisCommand } from './_lib/cache.js';
 
 type GeminiInlineData = { data: string; mimeType: string };
 type GeminiPart = { text?: string; inlineData?: GeminiInlineData };
@@ -13,8 +13,9 @@ const GLOBAL_DAILY_TTL = 60 * 60 * 24;
 const LOCK_TTL = 3;
 const CACHE_TTL = 3600;
 
+const GEMINI_MODEL = (process.env.GEMINI_MODEL || 'gemini-2.0-flash').trim();
 const GEMINI_MODEL_URL =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent';
+  `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
 
 function missingEnvVars(): string[] {
   const missing: string[] = [];

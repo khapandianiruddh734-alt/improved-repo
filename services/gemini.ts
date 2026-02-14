@@ -24,8 +24,9 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-2.0-flash").trim();
 const DEV_GEMINI_MODEL_URL =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent";
+  `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
 
 function getBrowserGeminiKey(): string {
   const key = (process.env.GEMINI_API_KEY || process.env.API_KEY || "").trim();
@@ -80,12 +81,14 @@ async function callGeminiDirectInDev(prompt: string, parts: GeminiPart[] = [], r
 }
 
 async function runProtectedGemini(prompt: string, parts: GeminiPart[] = [], retries = 2): Promise<string> {
-  const isDev = Boolean((import.meta as any)?.env?.DEV);
   const useServerApiInDev = String((import.meta as any)?.env?.VITE_USE_SERVER_API || "").toLowerCase() === "true";
+  const isLocalHost =
+    typeof window !== "undefined" &&
+    (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
   const userId = getOrCreateUserId();
 
-  // In local dev, default to direct Gemini and skip /api proxy entirely.
-  if (isDev && !useServerApiInDev) {
+  // For localhost usage, default to direct Gemini and skip /api unless explicitly enabled.
+  if (isLocalHost && !useServerApiInDev) {
     return callGeminiDirectInDev(prompt, parts, retries);
   }
 
@@ -125,7 +128,7 @@ async function runProtectedGemini(prompt: string, parts: GeminiPart[] = [], retr
 
       // In local/dev workflows, allow direct Gemini fallback when API route is unavailable
       // or misconfigured, so the UI stays usable while backend config is being fixed.
-      if (isDev && (networkError || serverError || apiUnavailable)) {
+      if (isLocalHost && !useServerApiInDev && (networkError || serverError || apiUnavailable)) {
         try {
           return await callGeminiDirectInDev(prompt, parts, retries);
         } catch {
