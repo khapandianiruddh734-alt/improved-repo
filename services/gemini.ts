@@ -24,8 +24,70 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+const DEV_GEMINI_MODEL_URL =
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent";
+
+function getBrowserGeminiKey(): string {
+  const key = (process.env.GEMINI_API_KEY || process.env.API_KEY || "").trim();
+  return key;
+}
+
+async function callGeminiDirectInDev(prompt: string, parts: GeminiPart[] = [], retries = 2): Promise<string> {
+  const key = getBrowserGeminiKey();
+  if (!key) {
+    throw new Error("Missing local API key for dev fallback");
+  }
+
+  let attempt = 0;
+  let lastError: any = null;
+  while (attempt <= retries) {
+    try {
+      const response = await fetch(`${DEV_GEMINI_MODEL_URL}?key=${encodeURIComponent(key)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [...parts, { text: prompt }] }],
+        }),
+      });
+
+      if (response.ok) {
+        const payload = await response.json();
+        const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (typeof text === "string") return text;
+        throw new Error("Invalid Gemini response");
+      }
+
+      if (response.status === 429 && attempt < retries) {
+        attempt += 1;
+        await delay(250 * attempt);
+        continue;
+      }
+
+      const body = await response.text();
+      throw new Error(body || `Gemini direct request failed (${response.status})`);
+    } catch (error: any) {
+      lastError = error;
+      if (attempt < retries) {
+        attempt += 1;
+        await delay(250 * attempt);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError || new Error("Gemini direct request failed");
+}
+
 async function runProtectedGemini(prompt: string, parts: GeminiPart[] = [], retries = 2): Promise<string> {
+  const isDev = Boolean((import.meta as any)?.env?.DEV);
+  const useServerApiInDev = String((import.meta as any)?.env?.VITE_USE_SERVER_API || "").toLowerCase() === "true";
   const userId = getOrCreateUserId();
+
+  // In local dev, default to direct Gemini and skip /api proxy entirely.
+  if (isDev && !useServerApiInDev) {
+    return callGeminiDirectInDev(prompt, parts, retries);
+  }
 
   let attempt = 0;
   let lastError: any = null;
@@ -49,11 +111,28 @@ async function runProtectedGemini(prompt: string, parts: GeminiPart[] = [], retr
       }
 
       const payload = await response.json().catch(() => ({}));
-      throw new Error(payload?.error || `Gemini request failed (${response.status})`);
+      const apiError = payload?.error || `Gemini request failed (${response.status})`;
+      const err: any = new Error(apiError);
+      err.status = response.status;
+      throw err;
     } catch (error: any) {
       lastError = error;
-      const networkError = !error?.message;
-      if (attempt < retries && networkError) {
+      const message = String(error?.message || "").toLowerCase();
+      const status = typeof error?.status === "number" ? error.status : 0;
+      const networkError = !error?.message || message.includes("failed to fetch");
+      const serverError = status >= 500 && status <= 599;
+      const apiUnavailable = status === 404;
+
+      // In local/dev workflows, allow direct Gemini fallback when API route is unavailable
+      // or misconfigured, so the UI stays usable while backend config is being fixed.
+      if (isDev && (networkError || serverError || apiUnavailable)) {
+        try {
+          return await callGeminiDirectInDev(prompt, parts, retries);
+        } catch {
+          // Keep original error behavior if fallback also fails.
+        }
+      }
+      if (attempt < retries && (networkError || serverError || apiUnavailable)) {
         attempt += 1;
         await delay(250 * attempt);
         continue;

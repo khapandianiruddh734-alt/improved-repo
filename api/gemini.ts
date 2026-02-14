@@ -67,7 +67,9 @@ async function callGeminiWithRetry(prompt: string, parts: GeminiPart[], retries 
       }
 
       const body = await response.text();
-      throw new Error(body || `Gemini error ${response.status}`);
+      const err: any = new Error(body || `Gemini error ${response.status}`);
+      err.status = response.status;
+      throw err;
     } catch (error) {
       lastError = error;
       if (attempt < retries) {
@@ -118,6 +120,19 @@ export default async function handler(req: any, res: any) {
       return res.status(400).json({ error: 'Missing userId' });
     }
 
+    // Prevent oversized OCR payloads from collapsing into generic 500s.
+    const approxInlineBytes = Array.isArray(parts)
+      ? parts.reduce((acc: number, part: any) => {
+          const data = part?.inlineData?.data;
+          return acc + (typeof data === 'string' ? data.length : 0);
+        }, 0)
+      : 0;
+    if (approxInlineBytes > 3_500_000) {
+      return res.status(413).json({
+        error: 'Input is too large for one request. Please upload fewer/smaller files.',
+      });
+    }
+
     const allowedRaw = await redisCommand(['SISMEMBER', 'users:list', cleanUserId]);
     const isAllowed = allowedRaw === 1 || allowedRaw === '1';
     if (!isAllowed) {
@@ -150,7 +165,12 @@ export default async function handler(req: any, res: any) {
     await redisCommand(['SETEX', cacheKey, CACHE_TTL, text]);
 
     return res.status(200).json({ text, cached: false });
-  } catch {
-    return res.status(500).json({ error: 'Gemini request failed' });
+  } catch (error: any) {
+    const status = typeof error?.status === 'number' ? error.status : 500;
+    const message = typeof error?.message === 'string' && error.message.trim()
+      ? error.message
+      : 'Gemini request failed';
+    console.error('[api/gemini] failed:', message);
+    return res.status(status >= 400 && status < 600 ? status : 500).json({ error: message });
   }
 }
