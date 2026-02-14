@@ -136,9 +136,8 @@ export default async function handler(req: any, res: any) {
     const allowedRaw = await redisCommand(['SISMEMBER', 'users:list', cleanUserId]);
     const isAllowed = allowedRaw === 1 || allowedRaw === '1';
     if (!isAllowed) {
-      return res.status(403).json({ error: 'User is not allowed' });
-    }
-
+  await redisCommand(['SADD', 'users:list', cleanUserId]);
+}
     const lockKey = `lock:${cleanUserId}`;
     const lock = await redisCommand(['SET', lockKey, '1', 'EX', LOCK_TTL, 'NX']);
     if (lock !== 'OK') {
