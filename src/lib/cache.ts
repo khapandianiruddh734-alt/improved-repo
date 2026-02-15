@@ -1,7 +1,6 @@
 function sanitizeEnv(value?: string): string | undefined {
   if (!value) return undefined;
   const trimmed = value.trim();
-  // Handles accidental quoted values from dashboard copy/paste.
   return trimmed.replace(/^["']|["']$/g, "");
 }
 
@@ -14,7 +13,7 @@ function assertRedisEnv(): void {
   }
 }
 
-async function redisCommand(command: (string | number)[]): Promise<any> {
+export async function redisCommand(command: (string | number)[]): Promise<any> {
   assertRedisEnv();
 
   const response = await fetch(REDIS_URL!, {
@@ -44,8 +43,5 @@ export async function getCache(key: string): Promise<string | null> {
 }
 
 export async function setCache(key: string, value: string): Promise<void> {
-  // Cache for 24 hours
   await redisCommand(["SETEX", key, 60 * 60 * 24, value]);
 }
-
-export { redisCommand };

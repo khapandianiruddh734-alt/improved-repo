@@ -370,7 +370,15 @@ export const Workspace: React.FC<WorkspaceProps> = ({ tool }) => {
       if (msg.includes("entity was not found") || msg.includes("api key") || msg.includes("invalid")) {
         setHasApiKey(false);
       }
-      setProcessing({ status: 'error', message: 'Operation Failed', details: err.message });
+      const quotaError =
+        msg.includes("quota exceeded") ||
+        msg.includes("resource_exhausted") ||
+        msg.includes("billing");
+      setProcessing({
+        status: 'error',
+        message: quotaError ? 'Gemini Quota Exceeded' : 'Operation Failed',
+        details: err.message,
+      });
     }
   };
 

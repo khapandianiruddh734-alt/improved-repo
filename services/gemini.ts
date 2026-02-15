@@ -33,6 +33,31 @@ function getBrowserGeminiKey(): string {
   return key;
 }
 
+function formatGeminiError(bodyText: string, status: number): string {
+  try {
+    const parsed = JSON.parse(bodyText);
+    const err = parsed?.error;
+    const baseMessage = typeof err?.message === "string" ? err.message : "";
+    const details = Array.isArray(err?.details) ? err.details : [];
+    const retryInfo = details.find((d: any) => String(d?.["@type"] || "").includes("RetryInfo"));
+    const retryDelay = typeof retryInfo?.retryDelay === "string" ? retryInfo.retryDelay : "";
+    const isQuota = /quota exceeded|resource_exhausted/i.test(baseMessage) || status === 429;
+
+    if (isQuota) {
+      return retryDelay
+        ? `Gemini quota exceeded. Retry after ${retryDelay}, or enable billing/increase quota.`
+        : "Gemini quota exceeded. Please retry later, or enable billing/increase quota.";
+    }
+
+    if (baseMessage) return baseMessage;
+  } catch {
+    // Keep fallback behavior for non-JSON responses.
+  }
+
+  if (status === 429) return "Gemini rate limit exceeded. Please retry later.";
+  return bodyText || `Gemini request failed (${status})`;
+}
+
 async function callGeminiDirectInDev(prompt: string, parts: GeminiPart[] = [], retries = 2): Promise<string> {
   const key = getBrowserGeminiKey();
   if (!key) {
@@ -65,7 +90,7 @@ async function callGeminiDirectInDev(prompt: string, parts: GeminiPart[] = [], r
       }
 
       const body = await response.text();
-      throw new Error(body || `Gemini direct request failed (${response.status})`);
+      throw new Error(formatGeminiError(body, response.status));
     } catch (error: any) {
       lastError = error;
       if (attempt < retries) {
@@ -114,7 +139,12 @@ async function runProtectedGemini(prompt: string, parts: GeminiPart[] = [], retr
       }
 
       const payload = await response.json().catch(() => ({}));
-      const apiError = payload?.error || `Gemini request failed (${response.status})`;
+      const apiError =
+        typeof payload?.error === "string"
+          ? payload.error
+          : typeof payload?.error?.message === "string"
+            ? payload.error.message
+            : `Gemini request failed (${response.status})`;
       const err: any = new Error(apiError);
       err.status = response.status;
       throw err;

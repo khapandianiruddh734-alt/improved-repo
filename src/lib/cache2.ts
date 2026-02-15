@@ -1,3 +1,4 @@
+// src/lib/cache.ts
 function sanitizeEnv(value?: string): string | undefined {
   if (!value) return undefined;
   const trimmed = value.trim();
@@ -37,3 +38,11 @@ export async function redisCommand(command: (string | number)[]): Promise<any> {
   return payload.result;
 }
 
+export async function getCache(key: string): Promise<string | null> {
+  const result = await redisCommand(["GET", key]);
+  return typeof result === "string" ? result : null;
+}
+
+export async function setCache(key: string, value: string): Promise<void> {
+  await redisCommand(["SETEX", key, 60 * 60 * 24, value]);
+}
