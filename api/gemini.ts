@@ -1,9 +1,8 @@
 type GeminiInlineData = { data: string; mimeType: string };
 type GeminiPart = { text?: string; inlineData?: GeminiInlineData };
 
-const GEMINI_MODEL = (process.env.GEMINI_MODEL || 'gemini-2.0-flash').trim();
-const GEMINI_MODEL_URL =
-  `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
+const GEMINI_MODEL = (process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
+const GEMINI_FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODELS || 'gemini-flash-latest,gemini-2.0-flash').trim();
 
 export const config = {
   api: {
@@ -22,6 +21,32 @@ function missingEnvVars(): string[] {
   const missing: string[] = [];
   if (!sanitizeEnv(process.env.GEMINI_API_KEY)) missing.push('GEMINI_API_KEY');
   return missing;
+}
+
+function modelCandidates(): string[] {
+  const rewriteLegacyModel = (rawModel: string): string => {
+    const trimmed = rawModel.trim();
+    const unprefixed = trimmed.startsWith('models/') ? trimmed.slice(7) : trimmed;
+    if (unprefixed === 'gemini-1.5-flash' || unprefixed === 'gemini-1.5-flash-001') return 'gemini-2.5-flash';
+    if (unprefixed === 'gemini-1.5-pro' || unprefixed === 'gemini-1.5-pro-001') return 'gemini-2.5-pro';
+    return unprefixed;
+  };
+
+  const candidates = [
+    rewriteLegacyModel(GEMINI_MODEL),
+    ...GEMINI_FALLBACK_MODELS.split(',')
+      .map((m) => rewriteLegacyModel(m))
+      .filter(Boolean),
+  ];
+  return Array.from(new Set(candidates));
+}
+
+function modelUrl(model: string): string {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+}
+
+function isQuotaStatus(status: number, message: string): boolean {
+  return status === 429 || /quota exceeded|resource_exhausted|rate limit/i.test(message);
 }
 
 function readGeminiErrorMessage(bodyText: string, status: number): string {
@@ -56,44 +81,59 @@ async function callGeminiWithRetry(prompt: string, parts: GeminiPart[], retries 
     throw new Error('GEMINI_API_KEY missing');
   }
 
-  let attempt = 0;
   let lastError: any = null;
 
-  while (attempt <= retries) {
-    try {
-      const response = await fetch(`${GEMINI_MODEL_URL}?key=${encodeURIComponent(key)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [...parts, { text: prompt }] }],
-        }),
-      });
+  for (const model of modelCandidates()) {
+    let attempt = 0;
+    while (attempt <= retries) {
+      try {
+        const response = await fetch(`${modelUrl(model)}?key=${encodeURIComponent(key)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [...parts, { text: prompt }] }],
+          }),
+        });
 
-      if (response.ok) {
-        const payload = await response.json();
-        const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (typeof text === 'string') return text;
-        throw new Error('Invalid Gemini response');
-      }
+        if (response.ok) {
+          const payload = await response.json();
+          const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (typeof text === 'string') return text;
+          throw new Error('Invalid Gemini response');
+        }
 
-      if (response.status === 429 && attempt < retries) {
-        attempt += 1;
-        await new Promise(resolve => setTimeout(resolve, 300 * attempt));
-        continue;
-      }
+        const body = await response.text();
+        const message = readGeminiErrorMessage(body, response.status);
+        const err: any = new Error(message);
+        err.status = response.status;
+        err.model = model;
 
-      const body = await response.text();
-      const err: any = new Error(readGeminiErrorMessage(body, response.status));
-      err.status = response.status;
-      throw err;
-    } catch (error) {
-      lastError = error;
-      if (attempt < retries) {
-        attempt += 1;
-        await new Promise(resolve => setTimeout(resolve, 300 * attempt));
-        continue;
+        if (isQuotaStatus(response.status, message) && attempt < retries) {
+          attempt += 1;
+          await new Promise(resolve => setTimeout(resolve, 350 * attempt));
+          continue;
+        }
+
+        if (isQuotaStatus(response.status, message)) {
+          lastError = err;
+          break;
+        }
+
+        throw err;
+      } catch (error: any) {
+        lastError = error;
+        const message = String(error?.message || '');
+        const status = typeof error?.status === 'number' ? error.status : 0;
+        if ((status === 429 || /quota exceeded|resource_exhausted|rate limit/i.test(message)) && attempt < retries) {
+          attempt += 1;
+          await new Promise(resolve => setTimeout(resolve, 350 * attempt));
+          continue;
+        }
+        if (status === 429 || /quota exceeded|resource_exhausted|rate limit/i.test(message)) {
+          break;
+        }
+        throw error;
       }
-      throw error;
     }
   }
 

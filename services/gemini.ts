@@ -24,9 +24,28 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-2.0-flash").trim();
-const DEV_GEMINI_MODEL_URL =
-  `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
+const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-2.5-flash").trim();
+const GEMINI_FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODELS || "gemini-flash-latest,gemini-2.0-flash").trim();
+
+function devModelCandidates(): string[] {
+  const rewriteLegacyModel = (rawModel: string): string => {
+    const trimmed = rawModel.trim();
+    const unprefixed = trimmed.startsWith("models/") ? trimmed.slice(7) : trimmed;
+    if (unprefixed === "gemini-1.5-flash" || unprefixed === "gemini-1.5-flash-001") return "gemini-2.5-flash";
+    if (unprefixed === "gemini-1.5-pro" || unprefixed === "gemini-1.5-pro-001") return "gemini-2.5-pro";
+    return unprefixed;
+  };
+
+  const models = [
+    rewriteLegacyModel(GEMINI_MODEL),
+    ...GEMINI_FALLBACK_MODELS.split(",").map(m => rewriteLegacyModel(m)).filter(Boolean),
+  ];
+  return Array.from(new Set(models));
+}
+
+function devModelUrl(model: string): string {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+}
 
 function getBrowserGeminiKey(): string {
   const key = (process.env.GEMINI_API_KEY || process.env.API_KEY || "").trim();
@@ -58,47 +77,146 @@ function formatGeminiError(bodyText: string, status: number): string {
   return bodyText || `Gemini request failed (${status})`;
 }
 
+function parseJsonFromModel(raw: string, fallback: any) {
+  const text = String(raw || "").trim();
+  if (!text) return fallback;
+
+  const candidates: string[] = [text];
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch?.[1]) {
+    candidates.push(fenceMatch[1].trim());
+  }
+
+  const firstBracket = text.indexOf("[");
+  const lastBracket = text.lastIndexOf("]");
+  if (firstBracket >= 0 && lastBracket > firstBracket) {
+    candidates.push(text.slice(firstBracket, lastBracket + 1).trim());
+  }
+
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(text.slice(firstBrace, lastBrace + 1).trim());
+  }
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  throw new Error("Model returned invalid JSON format");
+}
+
+function isRowArray(value: unknown): value is any[] {
+  return Array.isArray(value);
+}
+
+function toTableFromUnknown(value: any): any[][] {
+  if (!value) return [];
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return [];
+    if (value.every((row) => Array.isArray(row))) {
+      return value as any[][];
+    }
+    if (value.every((row) => row && typeof row === "object" && !Array.isArray(row))) {
+      const keys: string[] = Array.from(
+        value.reduce((set: Set<string>, row: Record<string, any>) => {
+          Object.keys(row).forEach((k) => set.add(k));
+          return set;
+        }, new Set<string>())
+      );
+      const rows = value.map((row: Record<string, any>) => keys.map((k) => String(row?.[k] ?? "")));
+      return [keys, ...rows];
+    }
+    return [];
+  }
+
+  if (typeof value === "object") {
+    const obj = value as Record<string, any>;
+    const directKeys = ["rows", "data", "result", "table", "items", "records"];
+    for (const key of directKeys) {
+      if (key in obj) {
+        const table = toTableFromUnknown(obj[key]);
+        if (table.length > 0) return table;
+      }
+    }
+
+    if (Array.isArray(obj.header) && Array.isArray(obj.rows)) {
+      const rows = obj.rows.map((r: any) => (Array.isArray(r) ? r : []));
+      return [obj.header, ...rows];
+    }
+  }
+
+  return [];
+}
+
+function headersEqual(a: any[], b: string[]): boolean {
+  if (!Array.isArray(a)) return false;
+  if (a.length < b.length) return false;
+  for (let i = 0; i < b.length; i++) {
+    if (String(a[i] ?? "").trim().toLowerCase() !== String(b[i]).trim().toLowerCase()) return false;
+  }
+  return true;
+}
+
 async function callGeminiDirectInDev(prompt: string, parts: GeminiPart[] = [], retries = 2): Promise<string> {
   const key = getBrowserGeminiKey();
   if (!key) {
     throw new Error("Missing local API key for dev fallback");
   }
 
-  let attempt = 0;
   let lastError: any = null;
-  while (attempt <= retries) {
-    try {
-      const response = await fetch(`${DEV_GEMINI_MODEL_URL}?key=${encodeURIComponent(key)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [...parts, { text: prompt }] }],
-        }),
-      });
+  for (const model of devModelCandidates()) {
+    let attempt = 0;
+    while (attempt <= retries) {
+      try {
+        const response = await fetch(`${devModelUrl(model)}?key=${encodeURIComponent(key)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [...parts, { text: prompt }] }],
+          }),
+        });
 
-      if (response.ok) {
-        const payload = await response.json();
-        const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (typeof text === "string") return text;
-        throw new Error("Invalid Gemini response");
-      }
+        if (response.ok) {
+          const payload = await response.json();
+          const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (typeof text === "string") return text;
+          throw new Error("Invalid Gemini response");
+        }
 
-      if (response.status === 429 && attempt < retries) {
-        attempt += 1;
-        await delay(250 * attempt);
-        continue;
+        const body = await response.text();
+        const message = formatGeminiError(body, response.status);
+        const quotaError = response.status === 429 || /quota exceeded|resource_exhausted|rate limit/i.test(message);
+        if (quotaError && attempt < retries) {
+          attempt += 1;
+          await delay(250 * attempt);
+          continue;
+        }
+        if (quotaError) {
+          lastError = new Error(message);
+          break;
+        }
+        throw new Error(message);
+      } catch (error: any) {
+        lastError = error;
+        const message = String(error?.message || "").toLowerCase();
+        const quotaError =
+          message.includes("quota exceeded") ||
+          message.includes("resource_exhausted") ||
+          message.includes("rate limit");
+        if (quotaError && attempt < retries) {
+          attempt += 1;
+          await delay(250 * attempt);
+          continue;
+        }
+        if (quotaError) break;
+        throw error;
       }
-
-      const body = await response.text();
-      throw new Error(formatGeminiError(body, response.status));
-    } catch (error: any) {
-      lastError = error;
-      if (attempt < retries) {
-        attempt += 1;
-        await delay(250 * attempt);
-        continue;
-      }
-      throw error;
     }
   }
 
@@ -308,7 +426,7 @@ export async function aiLabSmartParse(text: string): Promise<any[]> {
   try {
     const prompt = `Extract menu items from: ${text}\n\n${VARIATION_DIETARY_RULE}\nReturn JSON array only.`;
     const raw = await runProtectedGemini(prompt);
-    const result = JSON.parse(raw || "[]");
+    const result = parseJsonFromModel(raw, []);
     apiTracker.logRequest({ tool: 'AI Lab Smart Parse', model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: 1, fileFormats: ['txt'] });
     return result;
   } catch (e: any) { throw e; }
@@ -320,7 +438,7 @@ export async function aiFixMenuData(data: any[][]): Promise<any[][]> {
   try {
     const prompt = `${AI_FIXER_SYSTEM_PROMPT}\n\nInput Data: ${JSON.stringify(data)}\nReturn JSON only.`;
     const raw = await runProtectedGemini(prompt);
-    const result = JSON.parse(raw || "[]");
+    const result = parseJsonFromModel(raw, []);
     apiTracker.logRequest({ tool: 'AI Menu Fixer', model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: 1, fileFormats: ['xlsx'], accuracyScore: apiTracker.calculateAccuracy(result) });
     return result;
   } catch (e: any) { throw e; }
@@ -332,7 +450,7 @@ export async function aiTranslateData(data: any[][], targetLanguage: string, sco
   try {
     const prompt = `Translate to ${targetLanguage}. Scope: ${scope}. Data: ${JSON.stringify(data)}. Return JSON only.`;
     const raw = await runProtectedGemini(prompt);
-    const result = JSON.parse(raw || "[]");
+    const result = parseJsonFromModel(raw, []);
     apiTracker.logRequest({ tool: `AI Translator`, model, status: 'success', errorCategory: 'N/A', latency: Date.now() - startTime, fileCount: 1, fileFormats: ['xlsx'] });
     return result;
   } catch (e: any) { throw e; }
@@ -351,8 +469,9 @@ export async function aiExtractToExcel(inputs: { data: string, mimeType: string,
     ));
     const prompt = `${systemPrompt}${deepPrompt}\nLanguage: ${language}. Extract all items as a consolidated table starting with the headers provided. Return JSON array only.`;
     const responseText = await runProtectedGemini(prompt, parts);
-    const raw = JSON.parse(responseText || "[[]]");
-    const result = Array.isArray(raw) ? raw : [[]];
+    const parsed = parseJsonFromModel(responseText, [[]]);
+    const table = toTableFromUnknown(parsed);
+    const result = table.length > 0 ? table : [[]];
     let finalResult = result;
     if (mode === 'manual') {
       finalResult = normalizeManualSheetResult(result);
@@ -366,7 +485,9 @@ export async function aiExtractToExcel(inputs: { data: string, mimeType: string,
 
 function normalizeAiSheetResult(rawTable: any[][]): any[][] {
   const rows = Array.isArray(rawTable) ? rawTable : [];
-  const dataRows = rows.slice(1).map(r => Array.isArray(r) ? r.map(cell => String(cell ?? "")) : []);
+  const hasExpectedHeader = rows.length > 0 && headersEqual(rows[0], AI_SHEET_HEADERS);
+  const sourceRows = hasExpectedHeader ? rows.slice(1) : rows;
+  const dataRows = sourceRows.map(r => Array.isArray(r) ? r.map(cell => String(cell ?? "")) : []);
 
   const headerLen = AI_SHEET_HEADERS.length;
   const nameIdx = 0;
@@ -487,7 +608,10 @@ function escapeRegExp(value: string): string {
 
 function normalizeManualSheetResult(rawTable: any[][]): any[][] {
   const rows = Array.isArray(rawTable) ? rawTable : [];
-  const dataRows = rows.slice(1).map(r => Array.isArray(r) ? r.map(cell => String(cell ?? "")) : []);
+  const expectedStart = [...MANUAL_FIXED_HEADERS, ...VARIATION_BLOCK_HEADERS];
+  const hasExpectedHeader = rows.length > 0 && headersEqual(rows[0], expectedStart);
+  const sourceRows = hasExpectedHeader ? rows.slice(1) : rows;
+  const dataRows = sourceRows.map(r => Array.isArray(r) ? r.map(cell => String(cell ?? "")) : []);
 
   const fixedLen = MANUAL_FIXED_HEADERS.length;
   const blockLen = VARIATION_BLOCK_HEADERS.length;
