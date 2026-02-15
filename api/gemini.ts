@@ -1,6 +1,8 @@
 type GeminiInlineData = { data: string; mimeType: string };
 type GeminiPart = { text?: string; inlineData?: GeminiInlineData };
 
+import axios from 'axios';
+
 const GEMINI_MODEL = (process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
 const GEMINI_FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODELS || 'gemini-flash-latest,gemini-2.0-flash').trim();
 
@@ -124,6 +126,61 @@ async function callGeminiWithRetry(prompt: string, parts: GeminiPart[], retries 
         lastError = error;
         const message = String(error?.message || '');
         const status = typeof error?.status === 'number' ? error.status : 0;
+
+        // If undici/node fetch reports an HTTP/2 protocol error, try an HTTP/1.1 fallback via axios.
+        if (/ERR_HTTP2_PROTOCOL_ERROR|http2 protocol/i.test(message)) {
+          try {
+            const axiosResp = await axios.post(
+              `${modelUrl(model)}?key=${encodeURIComponent(key)}`,
+              { contents: [{ parts: [...parts, { text: prompt }] }] },
+              { headers: { 'Content-Type': 'application/json' }, timeout: 20000 }
+            );
+
+            if (axiosResp.status >= 200 && axiosResp.status < 300) {
+              const payload = axiosResp.data;
+              const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (typeof text === 'string') return text;
+              throw new Error('Invalid Gemini response');
+            }
+
+            const body = typeof axiosResp.data === 'string' ? axiosResp.data : JSON.stringify(axiosResp.data || {});
+            const msg = readGeminiErrorMessage(body, axiosResp.status);
+            const err: any = new Error(msg);
+            err.status = axiosResp.status;
+            err.model = model;
+
+            if (isQuotaStatus(axiosResp.status, msg) && attempt < retries) {
+              attempt += 1;
+              await new Promise(resolve => setTimeout(resolve, 350 * attempt));
+              continue;
+            }
+
+            if (isQuotaStatus(axiosResp.status, msg)) {
+              lastError = err;
+              break;
+            }
+
+            throw err;
+          } catch (axiosErr: any) {
+            lastError = axiosErr;
+            const aMsg = String(axiosErr?.message || '');
+            if (/fetch failed|network|timed out|econnreset|enotfound/i.test(aMsg) && attempt < retries) {
+              attempt += 1;
+              await new Promise(resolve => setTimeout(resolve, 350 * attempt));
+              continue;
+            }
+            if ((axiosErr?.response?.status === 429 || /quota exceeded|resource_exhausted|rate limit/i.test(aMsg)) && attempt < retries) {
+              attempt += 1;
+              await new Promise(resolve => setTimeout(resolve, 350 * attempt));
+              continue;
+            }
+            if (axiosErr?.response?.status === 429 || /quota exceeded|resource_exhausted|rate limit/i.test(aMsg)) {
+              break;
+            }
+            // fall through to original error handling below
+          }
+        }
+
         if (!status && /fetch failed|network|timed out|econnreset|enotfound/i.test(message)) {
           const upstreamError: any = new Error('Unable to reach Gemini API from server');
           upstreamError.status = 502;
