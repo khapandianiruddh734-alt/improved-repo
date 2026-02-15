@@ -1,17 +1,13 @@
-function sanitizeEnv(value?: string): string | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim();
-  return trimmed.replace(/^["']|["']$/g, "");
-}
+// Line 1 - DELETE THIS: import { redisCommand } from './_lib/cache.js';
 
-const REDIS_URL = sanitizeEnv(process.env.UPSTASH_REDIS_REST_URL || process.env.REDIS_URL);
-const REDIS_TOKEN = sanitizeEnv(process.env.UPSTASH_REDIS_REST_TOKEN || process.env.REDIS_TOKEN);
+type GeminiInlineData = { data: string; mimeType: string };
+type GeminiPart = { text?: string; inlineData?: GeminiInlineData };
 
-function assertRedisEnv(): void {
-  if (!REDIS_URL || !REDIS_TOKEN) {
-    throw new Error("Missing UPSTASH_REDIS_REST_URL/UPSTASH_REDIS_REST_TOKEN (or REDIS_URL/REDIS_TOKEN)");
-  }
-}
+const USER_DAILY_LIMIT = 15;
+const USER_MINUTE_LIMIT = 5;
+const TEAM_DAILY_LIMIT = 200;
+
+// ... rest of your code stays exactly the same ...
 
 export async function redisCommand(command: (string | number)[]): Promise<any> {
   assertRedisEnv();
@@ -36,4 +32,3 @@ export async function redisCommand(command: (string | number)[]): Promise<any> {
 
   return payload.result;
 }
-

@@ -1,4 +1,4 @@
-import { redisCommand } from './_lib/cache.js';
+import { redisCommand, getCache, setCache } from '../src/lib/cache.ts';
 
 type GeminiInlineData = { data: string; mimeType: string };
 type GeminiPart = { text?: string; inlineData?: GeminiInlineData };
@@ -17,11 +17,28 @@ const GEMINI_MODEL = (process.env.GEMINI_MODEL || 'gemini-2.0-flash').trim();
 const GEMINI_MODEL_URL =
   `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
 
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: '12mb',
+    },
+  },
+};
+
+function sanitizeEnv(value?: string): string {
+  if (!value) return '';
+  return value.trim().replace(/^["']|["']$/g, '');
+}
+
 function missingEnvVars(): string[] {
   const missing: string[] = [];
-  if (!process.env.UPSTASH_REDIS_REST_URL && !process.env.REDIS_URL) missing.push('UPSTASH_REDIS_REST_URL');
-  if (!process.env.UPSTASH_REDIS_REST_TOKEN && !process.env.REDIS_TOKEN) missing.push('UPSTASH_REDIS_REST_TOKEN');
-  if (!process.env.GEMINI_API_KEY) missing.push('GEMINI_API_KEY');
+  if (!sanitizeEnv(process.env.UPSTASH_REDIS_REST_URL) && !sanitizeEnv(process.env.REDIS_URL)) {
+    missing.push('UPSTASH_REDIS_REST_URL');
+  }
+  if (!sanitizeEnv(process.env.UPSTASH_REDIS_REST_TOKEN) && !sanitizeEnv(process.env.REDIS_TOKEN)) {
+    missing.push('UPSTASH_REDIS_REST_TOKEN');
+  }
+  if (!sanitizeEnv(process.env.GEMINI_API_KEY)) missing.push('GEMINI_API_KEY');
   return missing;
 }
 
@@ -35,7 +52,7 @@ async function incrementWithLimit(key: string, ttl: number, limit: number): Prom
 }
 
 async function callGeminiWithRetry(prompt: string, parts: GeminiPart[], retries = 2): Promise<string> {
-  const key = process.env.GEMINI_API_KEY;
+  const key = sanitizeEnv(process.env.GEMINI_API_KEY);
   if (!key) {
     console.warn('[api/gemini] GEMINI_API_KEY missing');
     throw new Error('GEMINI_API_KEY missing');
@@ -104,7 +121,16 @@ export default async function handler(req: any, res: any) {
   }
 
   const missing = missingEnvVars();
-  if (missing.length > 0) {
+  const missingGeminiOnly = missing.length === 1 && missing[0] === 'GEMINI_API_KEY';
+  const missingRedisOnly = missing.length > 0 && missing.every((name) =>
+    name === 'UPSTASH_REDIS_REST_URL' || name === 'UPSTASH_REDIS_REST_TOKEN'
+  );
+
+  if (!missingGeminiOnly && missing.length > 0 && !missingRedisOnly) {
+    console.warn(`[api/gemini] Missing critical env: ${missing.join(', ')}`);
+    return res.status(503).json({ error: 'Server configuration missing' });
+  }
+  if (missingGeminiOnly) {
     console.warn(`[api/gemini] Missing env: ${missing.join(', ')}`);
     return res.status(503).json({ error: 'Server configuration missing' });
   }
@@ -134,35 +160,50 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    const allowedRaw = await redisCommand(['SISMEMBER', 'users:list', cleanUserId]);
-    const isAllowed = allowedRaw === 1 || allowedRaw === '1';
-    if (!isAllowed) {
-  await redisCommand(['SADD', 'users:list', cleanUserId]);
-}
-    const lockKey = `lock:${cleanUserId}`;
-    const lock = await redisCommand(['SET', lockKey, '1', 'EX', LOCK_TTL, 'NX']);
-    if (lock !== 'OK') {
-      return res.status(429).json({ error: 'Too many quick requests' });
-    }
+    const redisAvailable = !missingRedisOnly;
+    let cacheKey = '';
+    if (redisAvailable) {
+      try {
+        const allowedRaw = await redisCommand(['SISMEMBER', 'users:list', cleanUserId]);
+        const isAllowed = allowedRaw === 1 || allowedRaw === '1';
+        if (!isAllowed) {
+          await redisCommand(['SADD', 'users:list', cleanUserId]);
+        }
 
-    const allowedMinute = await incrementWithLimit(`minute:${cleanUserId}`, USER_MINUTE_TTL, USER_MINUTE_LIMIT);
-    if (!allowedMinute) return res.status(429).json({ error: 'Minute limit exceeded' });
+        const lockKey = `lock:${cleanUserId}`;
+        const lock = await redisCommand(['SET', lockKey, '1', 'EX', LOCK_TTL, 'NX']);
+        if (lock !== 'OK') {
+          return res.status(429).json({ error: 'Too many quick requests' });
+        }
 
-    const allowedDaily = await incrementWithLimit(`daily:${cleanUserId}`, USER_DAILY_TTL, USER_DAILY_LIMIT);
-    if (!allowedDaily) return res.status(429).json({ error: 'Daily limit exceeded' });
+        const allowedMinute = await incrementWithLimit(`minute:${cleanUserId}`, USER_MINUTE_TTL, USER_MINUTE_LIMIT);
+        if (!allowedMinute) return res.status(429).json({ error: 'Minute limit exceeded' });
 
-    const allowedGlobal = await incrementWithLimit('global:daily', GLOBAL_DAILY_TTL, TEAM_DAILY_LIMIT);
-    if (!allowedGlobal) return res.status(429).json({ error: 'Team daily limit exceeded' });
+        const allowedDaily = await incrementWithLimit(`daily:${cleanUserId}`, USER_DAILY_TTL, USER_DAILY_LIMIT);
+        if (!allowedDaily) return res.status(429).json({ error: 'Daily limit exceeded' });
 
-    const cacheKey = `cache:${cleanPrompt}`;
-    const cached = await redisCommand(['GET', cacheKey]);
-    if (typeof cached === 'string' && cached.length > 0) {
-      return res.status(200).json({ text: cached, cached: true });
+        const allowedGlobal = await incrementWithLimit('global:daily', GLOBAL_DAILY_TTL, TEAM_DAILY_LIMIT);
+        if (!allowedGlobal) return res.status(429).json({ error: 'Team daily limit exceeded' });
+
+        cacheKey = `cache:${cleanPrompt}`;
+        const cached = await getCache(cacheKey);
+        if (typeof cached === 'string' && cached.length > 0) {
+          return res.status(200).json({ text: cached, cached: true });
+        }
+      } catch (redisError: any) {
+        console.warn('[api/gemini] Redis unavailable, continuing without rate-limit/cache:', redisError?.message || redisError);
+      }
     }
 
     const safeParts = normalizeParts(parts);
     const text = await callGeminiWithRetry(cleanPrompt, safeParts, 2);
-    await redisCommand(['SETEX', cacheKey, CACHE_TTL, text]);
+    if (cacheKey) {
+      try {
+        await setCache(cacheKey, text);
+      } catch (redisError: any) {
+        console.warn('[api/gemini] Cache write skipped:', redisError?.message || redisError);
+      }
+    }
 
     return res.status(200).json({ text, cached: false });
   } catch (error: any) {
