@@ -25,7 +25,7 @@ function missingEnvVars(): string[] {
 
 function modelCandidates(): string[] {
   const rewriteLegacyModel = (rawModel: string): string => {
-    const trimmed = rawModel.trim();
+    const trimmed = sanitizeEnv(rawModel);
     const unprefixed = trimmed.startsWith('models/') ? trimmed.slice(7) : trimmed;
     if (unprefixed === 'gemini-1.5-flash' || unprefixed === 'gemini-1.5-flash-001') return 'gemini-2.5-flash';
     if (unprefixed === 'gemini-1.5-pro' || unprefixed === 'gemini-1.5-pro-001') return 'gemini-2.5-pro';
@@ -124,6 +124,11 @@ async function callGeminiWithRetry(prompt: string, parts: GeminiPart[], retries 
         lastError = error;
         const message = String(error?.message || '');
         const status = typeof error?.status === 'number' ? error.status : 0;
+        if (!status && /fetch failed|network|timed out|econnreset|enotfound/i.test(message)) {
+          const upstreamError: any = new Error('Unable to reach Gemini API from server');
+          upstreamError.status = 502;
+          throw upstreamError;
+        }
         if ((status === 429 || /quota exceeded|resource_exhausted|rate limit/i.test(message)) && attempt < retries) {
           attempt += 1;
           await new Promise(resolve => setTimeout(resolve, 350 * attempt));

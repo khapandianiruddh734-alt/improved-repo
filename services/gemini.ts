@@ -27,9 +27,13 @@ function delay(ms: number): Promise<void> {
 const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-2.5-flash").trim();
 const GEMINI_FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODELS || "gemini-flash-latest,gemini-2.0-flash").trim();
 
+function sanitizeModelEnv(value: string): string {
+  return value.trim().replace(/^["']|["']$/g, "");
+}
+
 function devModelCandidates(): string[] {
   const rewriteLegacyModel = (rawModel: string): string => {
-    const trimmed = rawModel.trim();
+    const trimmed = sanitizeModelEnv(rawModel);
     const unprefixed = trimmed.startsWith("models/") ? trimmed.slice(7) : trimmed;
     if (unprefixed === "gemini-1.5-flash" || unprefixed === "gemini-1.5-flash-001") return "gemini-2.5-flash";
     if (unprefixed === "gemini-1.5-pro" || unprefixed === "gemini-1.5-pro-001") return "gemini-2.5-pro";
