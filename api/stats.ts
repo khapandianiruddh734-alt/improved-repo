@@ -1,4 +1,4 @@
-import { redisCommand } from '../src/lib/cache';
+import { redisCommand } from './_lib/cache';
 
 type UsageUser = { id: string; count: number };
 

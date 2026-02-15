@@ -1,4 +1,4 @@
-import { redisCommand } from '../src/lib/cache';
+import { redisCommand } from './_lib/cache';
 
 function warnMissingEnv() {
   if (!process.env.UPSTASH_REDIS_REST_URL && !process.env.REDIS_URL) {

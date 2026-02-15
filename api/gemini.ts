@@ -255,7 +255,24 @@ export default async function handler(req: any, res: any) {
     const message = typeof error?.message === 'string' && error.message.trim()
       ? error.message
       : 'Gemini request failed';
-    console.error('[api/gemini] failed:', message);
+
+    // Provide richer server-side logs for diagnostics (do not log API keys)
+    const logDetails: any = { status, message };
+    if (error?.model) logDetails.model = error.model;
+    if (error?.response && typeof error.response === 'object') {
+      // axios style error
+      try {
+        logDetails.responseStatus = error.response.status;
+        logDetails.responseData = typeof error.response.data === 'string' ? error.response.data : JSON.stringify(error.response.data || {});
+      } catch {}
+    }
+    if (error?.body) {
+      logDetails.body = typeof error.body === 'string' ? error.body : JSON.stringify(error.body || {});
+    }
+    if (error?.stack) logDetails.stack = String(error.stack).split('\n')[0];
+
+    console.error('[api/gemini] failed:', logDetails);
+
     return res.status(status >= 400 && status < 600 ? status : 500).json({ error: message });
   }
 }
