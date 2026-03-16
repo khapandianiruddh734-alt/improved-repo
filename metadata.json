@@ -1,0 +1,7 @@
+{
+  "name": "Copy of Copy of Making of the new app",
+  "description": "A comprehensive productivity suite for effortless document conversion, data cleaning, and AI-powered text correction. Features professional-grade PDF tools and intelligent data processing.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
